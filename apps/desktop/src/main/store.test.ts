@@ -290,3 +290,18 @@ test("floods stay bounded: a trip keeps MAX_TRIP_EVENTS, a note and later errors
   store.handle({ type: "action_end", actionId: root.id, at: Date.now() });
   assert.equal((await waited)?.complete, true);
 });
+
+test("#51: live events lose personal data with placeholders stable across the trip; local events keep theirs", () => {
+  const { store } = make();
+  const root = ev({ id: "d".repeat(16), kind: "user_action", name: 'Clicked "Orders"', trigger: "click", live: true });
+  const list = ev({ id: "e".repeat(16), parentId: root.id, kind: "http_request", name: "GET /api/orders", live: true, http: { method: "GET", url: "/api/orders", status: 200, resBody: '[{"email":"ada@example.com","phone":"+44 20 7946 0958"},{"email":"bob@example.com"}]' } });
+  const send = ev({ id: "f".repeat(16), parentId: root.id, kind: "http_request", name: "POST /api/notify", live: true, http: { method: "POST", url: "/api/notify?to=bob%40example.com", status: 202 } });
+  store.handle({ type: "events", events: [root, list, send] });
+  assert.equal(store.getEvent(list.id)!.http!.resBody, '[{"email":"[email#1]","phone":"[phone#1]"},{"email":"[email#2]"}]');
+  assert.equal(store.getEvent(send.id)!.http!.url, "/api/notify?to=[email#2]", "the same address keeps its number in a later event");
+
+  const local = ev({ id: "9".repeat(16), traceId: "9".repeat(32), kind: "http_request", name: "GET /api/orders", http: { method: "GET", url: "/api/orders", status: 200, resBody: '[{"email":"ada@example.com"}]' } });
+  store.handle({ type: "events", events: [local] });
+  assert.equal(store.getEvent(local.id)!.http!.resBody, '[{"email":"ada@example.com"}]', "local debugging needs the real values");
+  store.clear();
+});

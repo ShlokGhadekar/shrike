@@ -81,7 +81,7 @@ test("#53: a live site is read-only, with one card per path or scenario, and per
     liveOrigins: () => lv,
     requestApproval: async (r: { title: string; reason: string }) => (asked.push(r), true),
     sendRequest: async (s: { method: string; url: string }) => (did.push(`${s.method} ${s.url}`), { response: { status: 200, statusText: "OK", headers: {}, body: "ok", durationMs: 1 }, actionId: "" }),
-    appSnapshot: async () => ({ url: "https://demo.example.com/orders", title: "Orders", elements: [{ ref: "e1", role: "button", name: "Delete" }, { ref: "e2", role: "textbox", name: "Note" }], text: "Ordered by ada@example.com" }),
+    appSnapshot: async () => ({ url: "https://demo.example.com/orders", title: "Orders", elements: [{ ref: "e1", role: "button", name: "Delete" }, { ref: "e2", role: "textbox", name: "Note" }], text: "Ordered by ada@example.com, call +44 20 7946 0958" }),
     appClick: async (ref: string) => (did.push(`click ${ref}`), { actionId: null }),
     appType: async (ref: string) => (did.push(`type ${ref}`), { actionId: null }),
     appNavigate: async (url: string) => (did.push(`open ${url}`), { actionId: null }),
@@ -124,7 +124,7 @@ test("#53: a live site is read-only, with one card per path or scenario, and per
     host.requestApproval = async () => false;
     assert.match((await call("run_scenario", { steps })).text, /declined this scenario/);
 
-    assert.match((await call("app_snapshot")).text, /Ordered by \[email#1\]/);
+    assert.match((await call("app_snapshot")).text, /Ordered by \[email#1\], call \[phone#1\]/, "#51: phone numbers too");
     lv = [];
     assert.match((await call("app_snapshot")).text, /Ordered by ada@example\.com/, "a local project shows the real address");
   } finally {

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import type { ActionView, DebugEvent, IngestMessage, Place, ProjectInfo } from "@shrike/schema";
 import { buildActionView, relativize, resolveBrowserStack } from "@shrike/correlator";
-import { redactEvent } from "@shrike/redact";
+import { type PiiSeen, redactEvent } from "@shrike/redact";
 import { configPlaces } from "@shrike/scanner";
 
 export const ZERO_TRACE = "0".repeat(32);
@@ -73,6 +73,7 @@ export class Store {
   private configDeclared?: { root: string; places: Declared | undefined };
   private outbound = new Map<string, Outbound>(); // the page's cross-origin requests, by event id
   private aliases = new Map<string, string>(); // a joined server trace -> the page's trace
+  private pii = new Map<string, PiiSeen>(); // #51: live trips, traceId -> placeholders, so one email reads the same across the trip
   private docs = new Map<string, number>(); // page loads waiting for their "Opened" trip: traceId -> server start
   private navs: { traceId: string; rootId: string; startMs: number; at: number }[] = []; // recent "Opened" trips
 
@@ -94,8 +95,9 @@ export class Store {
   }
 
   private add(raw: DebugEvent): void {
-    const e = redactEvent(clampBodies(raw), this.opts.redactRules?.());
-    e.traceId = this.aliases.get(e.traceId) ?? e.traceId;
+    const traceId = this.aliases.get(raw.traceId) ?? raw.traceId;
+    const e = redactEvent(clampBodies(raw), this.opts.redactRules?.(), raw.live ? this.piiOf(traceId) : undefined); // live is set by main, never the page
+    e.traceId = traceId;
     if (e.source && (e.origin === "browser" || isAbsolute(e.source.file))) e.source = { ...e.source, file: relativize(e.source.file, this.opts.projectRoot()) }; // OpenTelemetry SDKs send absolute paths
     if ((e.kind === "http_request" || e.kind === "db_query" || e.kind === "user_action") && e.origin === "browser" && e.stack) {
       const stack = e.stack;
@@ -209,9 +211,19 @@ export class Store {
     }
   }
 
+  private piiOf(traceId: string): PiiSeen {
+    let seen = this.pii.get(traceId);
+    if (!seen) this.pii.set(traceId, (seen = new Map()));
+    return seen;
+  }
+
   private moveTrace(from: string, to: string): void {
     this.aliases.set(from, to);
     if (this.aliases.size > 1000) this.aliases.delete(this.aliases.keys().next().value!);
+    // ponytail: a trip joined into one that already numbered its own values keeps both numberings; joins are page-to-server, and server events are never live
+    const seen = this.pii.get(from);
+    if (seen && !this.pii.has(to)) this.pii.set(to, seen);
+    this.pii.delete(from);
     const old = this.traces.get(from);
     if (!old) return;
     clearTimeout(old.timer);
@@ -283,6 +295,7 @@ export class Store {
       for (const e of t.eventIds) this.events.delete(e);
       this.traces.delete(id);
       this.dirty.delete(id);
+      this.pii.delete(id);
     }
   }
 
@@ -502,6 +515,7 @@ export class Store {
     this.serviceHosts.clear();
     this.outbound.clear();
     this.aliases.clear();
+    this.pii.clear();
     this.docs.clear();
     this.navs = [];
     this.configDeclared = undefined;

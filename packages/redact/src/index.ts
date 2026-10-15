@@ -1,8 +1,8 @@
 import type { ActionView, Cell, DebugEvent, RedactRules, TimelineNode } from "@shrike/schema";
 
-const SENSITIVE_HEADERS = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"]);
-// "auth" and "authorization", but not "author"/"authorId"
-const KEY = String.raw`pass(?:word)?|passwd|secret|token|api[-_]?key|auth(?!or(?!i[zs]))|session|credential|private[-_]?key|card|cvv|(?<!cla)ssn`; // not "className"
+const SENSITIVE_HEADERS = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key", "x-vercel-protection-bypass", "x-vercel-set-bypass-cookie"]);
+// "auth" and "authorization", but not "author"/"authorId"; Vercel's preview bypass (#51), as a header or query parameter
+const KEY = String.raw`pass(?:word)?|passwd|secret|token|api[-_]?key|auth(?!or(?!i[zs]))|session|credential|private[-_]?key|card|cvv|(?<!cla)ssn|vercel-protection-bypass|vercel-set-bypass-cookie`; // not "className"
 const NUMERIC_KEY_RE = /card|cvv|ssn/i;
 
 const label = (name: string) => `[redacted:${name}]`;
@@ -79,7 +79,7 @@ const looksSecret = (v: string): boolean =>
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const looksToken = (v: string): boolean => /^[A-Za-z0-9_-]{32,512}$/.test(v) && /\d/.test(v) && /[a-z]/i.test(v) && !UUID.test(v) && entropy(v) > 3;
 
-export function redactText(s: string, rules?: RedactRules): string {
+export function redactText(s: string, rules?: RedactRules, pii?: PiiSeen): string {
   if (!s) return s;
   let out = s;
   // connection strings: keep the user, mask the password
@@ -96,41 +96,88 @@ export function redactText(s: string, rules?: RedactRules): string {
   out = out.replace(/([=:]\s*)([A-Za-z0-9+/_=.-]{24,512})(?=$|[\s&;,)}\]])/g, (m, sep: string, v: string, at: number, all: string) =>
     looksSecret(v) && !v.startsWith("//") && !/\/\/[^\s/?#@]+$/.test(all.slice(Math.max(0, at - 260), at)) ? `${sep}${label("secret")}` : m, // a URL's scheme or port colon is not a key
   );
-  return out;
+  return pii ? redactPii(out, pii) : out;
 }
 
-const redactHeaders = (h: Record<string, string> | undefined, rules?: RedactRules) => {
+// #51 (docs/07 rule 7): personal data on live trips. Each value becomes a placeholder numbered per kind, and the same
+// value gets the same one wherever it appears in the map's trip, so the agent can tell two rows had the same user.
+// ponytail: names and street addresses can't be found by pattern; value masking (#52) covers them where data leaves.
+export type PiiSeen = Map<string, string>; // "email:ann@shop.com" -> "[email#1]"
+
+// A PostgREST filter's operator stays visible: email=eq.[email#1], not email=[email#1].
+const EMAIL = /(?:(?<![\w.%+-])(?!(?:n?eq|i?like)\.)|(?<=(?<![\w.%+-])(?:n?eq|i?like)\.))[A-Za-z0-9._%+-]{1,64}(?:@|%40)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}(?![\w-])/gi;
+// A "+" (E.164) or a separator pattern; a bare run of digits is an id, so it stays.
+const PHONE = /(?<![\w+%.-])(?:(?:\+|%2B)\d[\d ().-]{5,17}\d\d|\(\d{3}\) ?\d{3}[-. ]\d{4}|\d{3}([-. ])\d{3}\1\d{4})(?![\w-]|\.\d|%| \d{3})/gi; // and not the start of a longer run of digit groups
+const IBAN = /(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])/g;
+
+/** ISO 13616: 15 to 34 characters and mod 97 == 1, so ids that only look like an IBAN stay. */
+function ibanValid(s: string): boolean {
+  const c = s.replace(/ /g, "");
+  if (c.length < 15 || c.length > 34) return false;
+  let m = 0;
+  for (const ch of c.slice(4) + c.slice(0, 4)) for (const d of /\d/.test(ch) ? ch : String(ch.charCodeAt(0) - 55)) m = (m * 10 + Number(d)) % 97;
+  return m === 1;
+}
+
+function placeholder(seen: PiiSeen, kind: string, value: string): string {
+  const key = `${kind}:${value}`;
+  let p = seen.get(key);
+  if (!p) {
+    let n = 1;
+    for (const k of seen.keys()) if (k.startsWith(`${kind}:`)) n++;
+    seen.set(key, (p = `[${kind}#${n}]`));
+  }
+  return p;
+}
+
+/** Emails, phone numbers and IBANs become [email#n], [phone#n] and [iban#n]. Pure; pass one map per trip to keep the numbers stable. */
+export function redactPii(s: string, seen: PiiSeen = new Map()): string {
+  if (!s) return s;
+  return s
+    .replace(EMAIL, (m) => placeholder(seen, "email", m.replace(/%40/i, "@").toLowerCase())) // as typed, Ann@ and ann@ are one user
+    .replace(PHONE, (m) => {
+      const digits = m.replace(/%2B/i, "+").replace(/[^\d+]/g, "");
+      const n = digits.replace("+", "").length;
+      return n < 8 || n > 15 ? m : placeholder(seen, "phone", digits); // E.164 allows 15 at most
+    })
+    .replace(IBAN, (m) => (ibanValid(m) ? placeholder(seen, "iban", m.replace(/ /g, "")) : m));
+}
+
+const redactHeaders = (h: Record<string, string> | undefined, rules?: RedactRules, pii?: PiiSeen) => {
   if (!h) return h;
   const extra = new Set(rules?.headers?.map((x) => x.toLowerCase()));
   const user = userRes(rules)?.re;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h)) {
     const name = k.toLowerCase();
-    out[k] = SENSITIVE_HEADERS.has(name) || KEY_RE.test(name) || extra.has(name) || user?.test(name) ? label(name) : redactText(v, rules);
+    out[k] = SENSITIVE_HEADERS.has(name) || KEY_RE.test(name) || extra.has(name) || user?.test(name) ? label(name) : redactText(v, rules, pii);
   }
   return out;
 };
 
 /** I: a value from a database row or cache entry; a column or key that names a secret is masked whole. */
-export function redactCell(name: string, v: Cell, rules?: RedactRules): Cell {
+export function redactCell(name: string, v: Cell, rules?: RedactRules, pii?: PiiSeen): Cell {
   const secret = KEY_RE.test(name) || !!userRes(rules)?.re.test(name);
   if (v === null || typeof v !== "string") return v !== null && secret ? label(name.toLowerCase()) : v;
-  return secret && !isRedacted(v) ? label(name.toLowerCase()) : redactText(v, rules);
+  return secret && !isRedacted(v) ? label(name.toLowerCase()) : redactText(v, rules, pii);
 }
 
-export function redactRow(row: Record<string, Cell>, rules?: RedactRules): Record<string, Cell> {
-  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, redactCell(k, v, rules)]));
+export function redactRow(row: Record<string, Cell>, rules?: RedactRules, pii?: PiiSeen): Record<string, Cell> {
+  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, redactCell(k, v, rules, pii)]));
 }
 
-/** rules: the user's `redact.keys` and `redact.headers` from .shrike/config.json, redacted like the built-in names. */
-export function redactEvent(e: DebugEvent, rules?: RedactRules): DebugEvent {
-  const t = (s: string) => redactText(s, rules);
+/**
+ * rules: the user's `redact.keys` and `redact.headers` from .shrike/config.json, redacted like the built-in names.
+ * pii: live events only (#51); personal data is replaced too, numbered in this map (one per trip).
+ */
+export function redactEvent(e: DebugEvent, rules?: RedactRules, pii?: PiiSeen): DebugEvent {
+  const t = (s: string) => redactText(s, rules, pii);
   const opt = (s: string | undefined) => (s === undefined ? s : t(s));
   const r: DebugEvent = { ...e, name: t(e.name) };
   if (e.http) {
     r.http = { ...e.http, url: t(e.http.url) };
-    if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders, rules);
-    if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders, rules);
+    if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders, rules, pii);
+    if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders, rules, pii);
     if (e.http.serverTiming !== undefined) r.http.serverTiming = Array.isArray(e.http.serverTiming) ? e.http.serverTiming.filter((x) => typeof x?.name === "string").map(({ name, durMs, desc }) => ({ name: t(name), ...(typeof durMs === "number" && { durMs }), ...(typeof desc === "string" && { desc: t(desc) }) })) : undefined; // page-supplied: never throw
     if (e.http.reqBody !== undefined) r.http.reqBody = t(e.http.reqBody);
     if (e.http.resBody !== undefined) r.http.resBody = t(e.http.resBody);
@@ -147,7 +194,7 @@ export function redactEvent(e: DebugEvent, rules?: RedactRules): DebugEvent {
   }
   if (e.cache?.key !== undefined) r.cache = { ...e.cache, key: t(e.cache.key) };
   if (e.caller) r.caller = { ...e.caller, label: t(e.caller.label), ...(e.caller.command !== undefined ? { command: t(e.caller.command) } : {}) };
-  if (e.change?.rows) r.change = { ...e.change, rows: e.change.rows.map((x) => ({ ...x, ...(x.before ? { before: redactRow(x.before, rules) } : {}), ...(x.after ? { after: redactRow(x.after, rules) } : {}) })) };
+  if (e.change?.rows) r.change = { ...e.change, rows: e.change.rows.map((x) => ({ ...x, ...(x.before ? { before: redactRow(x.before, rules, pii) } : {}), ...(x.after ? { after: redactRow(x.after, rules, pii) } : {}) })) };
   if (e.args) r.args = e.args.map(t);
   if (e.returned !== undefined) r.returned = opt(e.returned);
   if (e.stack !== undefined) r.stack = opt(e.stack);
@@ -163,7 +210,7 @@ export interface MaskOptions {
 }
 
 const PII = /[^\s@]+@[^\s@]+\.[a-z]{2,}|^\+\d|\d{3}[-.)]\s?\d{3}[-.]\d{4}/i;
-const PLACEHOLDER = /^\[(?:redacted|text#|email#)/;
+const PLACEHOLDER = /^\[(?:redacted|text#|email#|phone#|iban#)/;
 
 /** A value that stays when masked: empty, a placeholder, a UUID or number, or a short enum-like word ("pending": no spaces, 24 characters or fewer, no email or phone). */
 const keepsValue =(v: string): boolean => !v || PLACEHOLDER.test(v) || UUID.test(v) || /^-?\d+(?:\.\d+)?$/.test(v) || (v.length <= 24 && !/\s/.test(v) && !PII.test(v));

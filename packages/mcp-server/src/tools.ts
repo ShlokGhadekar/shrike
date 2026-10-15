@@ -6,7 +6,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ShapeOutput } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ActionView, ApiAssertion, ApiAssertionResult, AppElement, DebugEvent, HttpResponseSpec, Quest, ShrikeHost, SourceLocation, TimelineNode } from "@shrike/schema";
 import { compareActions, formatActionTree } from "@shrike/correlator";
-import { maskAction, maskText, maskValues, type MaskOptions, redactText } from "@shrike/redact";
+import { maskAction, maskText, maskValues, type MaskOptions, redactPii, redactText } from "@shrike/redact";
 import { registerDriveTools } from "./drive.ts";
 import { OUTCOME, outcomeOf, readSkills, type SkillHost } from "./skills.ts";
 import { optionsReplyText } from "./options.ts";
@@ -57,7 +57,7 @@ export function registerTools(mcp: McpServer, base: ShrikeHost, ctx: ToolContext
 
   // #53: a live project's origins; empty for a local project
   const live = () => host.liveOrigins?.() ?? [];
-  const shown = (text: string) => (live().length ? maskPersonal(redactText(text)) : redactText(text));
+  const shown = (text: string) => (live().length ? redactPii(redactText(text)) : redactText(text)); // #51: numbered per output
 
   const answered = new Map<string, boolean>(); // #53: once-per-path answers on the live site, for this session
   const askOnce = async (key: string, title: string, reason: string, declined: string, request?: { method: string; url: string }) => {
@@ -936,16 +936,5 @@ function maskedHost(h: ShrikeHost, o: () => MaskOptions): ShrikeHost {
     getEvent: (id: string) => event(h.getEvent(id)),
     searchEvents: (q: string) => h.searchEvents(q).map((e) => event(e)!),
     waitForAction: async (id: string, ms?: number) => view(await h.waitForAction(id, ms)),
-  });
-}
-
-// #53 seam for #51: live tool output masks emails as [email#n] before it reaches the model.
-// ponytail: emails only, numbered per output. Upgrade: #51's detectors (phones, Vercel bypass token) here.
-function maskPersonal(s: string): string {
-  const seen = new Map<string, number>();
-  return s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, (m) => {
-    const k = m.toLowerCase();
-    if (!seen.has(k)) seen.set(k, seen.size + 1);
-    return `[email#${seen.get(k)}]`;
   });
 }
