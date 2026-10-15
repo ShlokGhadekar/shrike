@@ -59,4 +59,7 @@ test("redaction reaches Server-Timing descriptions", () => {
   const [auth, db] = redactEvent(ev).http!.serverTiming!;
   assert.equal(auth!.desc, "token=[redacted:token]");
   assert.deepEqual(db, { name: "db", durMs: 9 });
+  const bad = (serverTiming: unknown) => redactEvent({ ...ev, http: { ...ev.http!, serverTiming } as DebugEvent["http"] }).http!.serverTiming;
+  assert.equal(bad("db;dur=5"), undefined, "a page sending a string doesn't throw");
+  assert.deepEqual(bad([null, { desc: 5 }, { name: "ok", desc: 5 }]), [{ name: "ok" }], "junk entries are dropped, never thrown on");
 });

@@ -131,7 +131,7 @@ export function redactEvent(e: DebugEvent, rules?: RedactRules): DebugEvent {
     r.http = { ...e.http, url: t(e.http.url) };
     if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders, rules);
     if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders, rules);
-    if (e.http.serverTiming) r.http.serverTiming = e.http.serverTiming.map((x) => (x.desc !== undefined ? { ...x, desc: t(x.desc) } : x));
+    if (e.http.serverTiming !== undefined) r.http.serverTiming = Array.isArray(e.http.serverTiming) ? e.http.serverTiming.filter((x) => typeof x?.name === "string").map(({ name, durMs, desc }) => ({ name: t(name), ...(typeof durMs === "number" && { durMs }), ...(typeof desc === "string" && { desc: t(desc) }) })) : undefined; // page-supplied: never throw
     if (e.http.reqBody !== undefined) r.http.reqBody = t(e.http.reqBody);
     if (e.http.resBody !== undefined) r.http.resBody = t(e.http.resBody);
   }
