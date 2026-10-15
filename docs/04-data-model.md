@@ -36,6 +36,8 @@ type DebugEvent = {
   http?: {
     method: string; url: string; status?: number;
     reqHeaders?: Record<string, string>; resHeaders?: Record<string, string>;
+    serverTiming?: { name: string; durMs?: number; desc?: string }[]; // parsed Server-Timing (#59)
+    serverTraceId?: string;  // from the traceresponse header: the trace ID the server used (#59)
     reqBody?: unknown; resBody?: unknown; sizeBytes?: number;
   };
   db?: { system: string; statement: string; params?: unknown[]; rows?: number };

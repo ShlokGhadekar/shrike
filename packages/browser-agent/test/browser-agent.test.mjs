@@ -101,6 +101,8 @@ test("browser-agent end to end in Electron", { timeout: 90_000 }, async () => {
   assert.equal(post.http.reqBody, JSON.stringify({ title: "buy milk" }));
   assert.equal(post.http.reqHeaders["content-type"], "application/json");
   assert.equal(post.http.resHeaders["x-served-by"], "harness");
+  assert.deepEqual(post.http.serverTiming, [{ name: "db", durMs: 53.2, desc: "Postgres" }, { name: "app", durMs: 47 }], "#59: Server-Timing parsed");
+  assert.equal(post.http.serverTraceId, "ab".repeat(16), "#59: the server's trace ID from traceresponse");
   assert.match(post.http.resBody, /NOT NULL constraint failed/);
   assert.match(post.stack, /page\.js/);
   assert.match(post.stack.split("\n")[1], /page\.js/, "first frame is the caller, not the agent");
@@ -129,6 +131,7 @@ test("browser-agent end to end in Electron", { timeout: 90_000 }, async () => {
   assert.equal(crossStart.id, crossEv.id);
   assert.equal(crossStart.durationMs, undefined);
   assert.equal(crossEv.http.reqHeaders.traceparent, undefined);
+  assert.equal(crossEv.http.serverTiming, undefined, "cross-origin Server-Timing the server didn't expose stays hidden");
   assert.match(crossEv.http.url, /^http:\/\/127\.0\.0\.1:\d+\/api\/cors$/);
   const crossReqs = out.received.filter((r) => r.path.startsWith("cross:"));
   assert.deepEqual(crossReqs.map((r) => [r.method, r.traceparent]), [["GET", null]]);
@@ -150,6 +153,7 @@ test("browser-agent end to end in Electron", { timeout: 90_000 }, async () => {
   assert.equal(x.name, "POST /api/echo");
   assert.equal(x.http.status, 200);
   assert.equal(x.http.reqBody, "hello xhr");
+  assert.deepEqual(x.http.serverTiming, [{ name: "cache", desc: "miss" }, { name: "total", durMs: 12 }], "#59: XHR reads Server-Timing too");
   assert.equal(out.results.xhr.status, 200);
   assert.equal(out.results.xhr.body.body, "hello xhr");
   assert.equal(out.results.xhr.body.headers.traceparent, `00-${x.traceId}-${x.id}-01`);

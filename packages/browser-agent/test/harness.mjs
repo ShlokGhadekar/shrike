@@ -34,8 +34,8 @@ const main = await listen((req, res) => {
     const body = Buffer.concat(chunks).toString();
     const path = req.url;
     if (path.startsWith("/api/")) received.push({ path, method: req.method, traceparent: req.headers.traceparent ?? null });
-    const json = (status, v) => {
-      res.writeHead(status, { "content-type": "application/json", "x-served-by": "harness" });
+    const json = (status, v, extra = {}) => {
+      res.writeHead(status, { "content-type": "application/json", "x-served-by": "harness", ...extra });
       res.end(JSON.stringify(v));
     };
     if (path === "/") {
@@ -53,12 +53,13 @@ const main = await listen((req, res) => {
       res.writeHead(200, { "content-type": "text/javascript" });
       res.end(readFileSync(file));
     } else if (path === "/api/initial") json(200, { initial: true });
-    else if (path === "/api/todos") json(500, { error: "NOT NULL constraint failed: todos.user_id", got: JSON.parse(body) });
+    else if (path === "/api/todos")
+      json(500, { error: "NOT NULL constraint failed: todos.user_id", got: JSON.parse(body) }, { "server-timing": 'db;dur=53.2;desc="Postgres", app;dur=47', traceresponse: `00-${"ab".repeat(16)}-${"cd".repeat(8)}-01` });
     else if (path === "/api/fail") {
       res.writeHead(500, { "content-type": "text/plain" });
       res.end("boom");
     } else if (path === "/api/destroy") req.socket.destroy();
-    else if (path === "/api/echo") json(200, { method: req.method, headers: req.headers, body });
+    else if (path === "/api/echo") json(200, { method: req.method, headers: req.headers, body }, { "server-timing": "cache;desc=miss, total;dur=12" });
     else if (path === "/api/stream") {
       res.writeHead(200, { "content-type": "text/plain" });
       res.write("a");
@@ -79,6 +80,7 @@ const cross = await listen((req, res) => {
     "access-control-allow-origin": "*",
     "access-control-allow-headers": "*",
     "content-type": "text/plain",
+    "server-timing": "db;dur=99", // not exposed (no Access-Control-Expose-Headers): the page can't read it
   });
   res.end(req.method === "OPTIONS" ? "" : "cross ok");
 });

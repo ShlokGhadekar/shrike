@@ -464,6 +464,17 @@ test("live: a same-origin request with nothing recorded inside lands on a grey S
   assert.equal(buildTrip(view(click, [node(call("/api/save", { http: { method: "GET", url: "/api/save", status: 200, resHeaders: { "x-vercel-cache": "HIT" } } }))], "ok"), new Set(), known).stations.find((s) => s.live)!.label, "From cache");
 });
 
+test("live: Server-Timing entries with a duration become the grey station's chip (#59)", () => {
+  const known = knownPlaces([], [], { liveUrl: "https://shop.example.com" });
+  const click = ev({ kind: "user_action", origin: "browser", name: 'Clicked "Save"', trigger: "click", source: src("app/page.tsx", 9) });
+  const call = (serverTiming: unknown) => ev({ startMs: 10, durationMs: 180, kind: "http_request", origin: "browser", name: "POST", http: { method: "POST", url: "/api/save", status: 200, serverTiming } as DebugEvent["http"] });
+  const chip = (t: unknown) => buildTrip(view(click, [node(call(t))], "ok"), new Set(), known).stations.find((s) => s.live)!.chip;
+  assert.equal(chip([{ name: "db", durMs: 53.2, desc: "Postgres" }, { name: "cache", desc: "miss" }, { name: "app", durMs: 47 }]), "db 53ms, app 47ms");
+  assert.equal(chip([{ name: "cache", desc: "miss" }]), undefined, "no durations, no chip");
+  assert.equal(chip(undefined), undefined);
+  assert.equal(chip("db;dur=5"), undefined, "a malformed field from the page is ignored");
+});
+
 test("live: a Next.js page load and its page data (RSC) say Rendered on the server", () => {
   const known = knownPlaces([], [], { liveUrl: "https://shop.example.com" });
   const nav = ev({ kind: "user_action", origin: "browser", name: "Opened /", trigger: "navigation" });

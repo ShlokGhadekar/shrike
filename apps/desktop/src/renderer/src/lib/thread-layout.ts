@@ -665,8 +665,13 @@ function liveServer(known: readonly Place[], host?: string): Place | undefined {
 // Next.js page data: the router's fetch carries an RSC header and an _rsc query.
 const isRsc = (e: DebugEvent) => e.http?.reqHeaders?.rsc === "1" || /[?&]_rsc=/.test(e.http?.url ?? "");
 const CDN_HIT = ["x-vercel-cache", "cf-cache-status", "x-cache"];
-// #59: Server-Timing entries ("db 180 ms, render 40 ms") become the station's chip here.
-const serverTiming = (_e: DebugEvent): string | undefined => undefined;
+// #59: Server-Timing entries with a duration become the station's chip: "db 180ms, render 40ms".
+function serverTiming(e: DebugEvent): string | undefined {
+  const t = e.http?.serverTiming;
+  if (!Array.isArray(t)) return undefined; // from the page: don't trust the shape
+  const parts = t.filter((x) => typeof x?.name === "string" && typeof x.durMs === "number").map((x) => `${x.name} ${Math.round(x.durMs!)}ms`);
+  return parts.length ? clip(parts.join(", "), 48) : undefined;
+}
 
 /** T22 words: what answered, its status and time, and why Shrike can't show more. */
 function unseen(e: DebugEvent, rendered: boolean): Pick<Station, "label" | "where" | "caption" | "chip"> {

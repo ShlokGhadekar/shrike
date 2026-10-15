@@ -3,6 +3,7 @@ import { beginWork } from "./actions.ts";
 import { dataKind, toData, type DataKind } from "./data.ts";
 import { emitEvent } from "./emit.ts";
 import { newEventId } from "./ids.ts";
+import { serverSide } from "./server-timing.ts";
 
 const LIMIT = 64 * 1024;
 const BODY_WAIT_MS = 5000;
@@ -176,6 +177,7 @@ function patchFetch(): void {
         try {
           ev.http!.status = res.status;
           ev.http!.resHeaders = headersObject(res.headers);
+          readServerSide(ev);
           const failed = res.status >= 500;
           readResponseBody(res).then(
             (b) => {
@@ -261,6 +263,7 @@ function patchXhr(): void {
             const status = xhr.status;
             if (status) ev.http!.status = status;
             ev.http!.resHeaders = parseHeaders(xhr.getAllResponseHeaders());
+            readServerSide(ev);
             const rt = xhr.responseType;
             if (rt === "" || rt === "text") ev.http!.resBody = cut(xhr.responseText);
             else if (rt === "json") ev.http!.resBody = cut(JSON.stringify(xhr.response) ?? "");
@@ -284,6 +287,13 @@ function patchXhr(): void {
       throw err;
     }
   };
+}
+
+// #59: cross-origin, the browser hides these unless the server exposes them, so there's simply nothing to read.
+function readServerSide(ev: DebugEvent): void {
+  try {
+    Object.assign(ev.http!, serverSide(ev.http!.resHeaders));
+  } catch {}
 }
 
 function parseHeaders(raw: string): Record<string, string> {

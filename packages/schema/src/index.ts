@@ -45,6 +45,8 @@ export interface DebugEvent {
     status?: number;
     reqHeaders?: Record<string, string>;
     resHeaders?: Record<string, string>;
+    serverTiming?: { name: string; durMs?: number; desc?: string }[]; // #59: parsed Server-Timing, ≤ 20 entries
+    serverTraceId?: string; // #59: trace ID from the traceresponse header, the one the server used (not Shrike's traceId)
     reqBody?: string; // ≤ 64KB, truncated with "…[truncated]"
     resBody?: string;
   };

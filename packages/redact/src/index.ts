@@ -107,6 +107,7 @@ export function redactEvent(e: DebugEvent): DebugEvent {
     r.http = { ...e.http, url: redactText(e.http.url) };
     if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders);
     if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders);
+    if (e.http.serverTiming) r.http.serverTiming = e.http.serverTiming.map((t) => (t.desc !== undefined ? { ...t, desc: redactText(t.desc) } : t));
     if (e.http.reqBody !== undefined) r.http.reqBody = redactText(e.http.reqBody);
     if (e.http.resBody !== undefined) r.http.resBody = redactText(e.http.resBody);
   }
