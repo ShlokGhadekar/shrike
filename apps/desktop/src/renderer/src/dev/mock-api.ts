@@ -901,6 +901,11 @@ export const mockApi: ShrikeApi = {
   async setAppSide(side) {
     return side;
   },
+  async signOutLive() {},
+  async appPartition() {
+    return "persist:shrike-app";
+  },
+  async answerLiveLogin() {},
   async getMemory() {
     return memory;
   },

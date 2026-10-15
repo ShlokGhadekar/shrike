@@ -6,7 +6,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ShapeOutput } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ActionView, ApiAssertion, ApiAssertionResult, AppElement, DebugEvent, HttpResponseSpec, Quest, ShrikeHost, SourceLocation, TimelineNode } from "@shrike/schema";
 import { compareActions, formatActionTree } from "@shrike/correlator";
-import { redactText } from "@shrike/redact";
+import { maskAction, maskText, maskValues, type MaskOptions, redactText } from "@shrike/redact";
 import { registerDriveTools } from "./drive.ts";
 import { OUTCOME, outcomeOf, readSkills, type SkillHost } from "./skills.ts";
 import { optionsReplyText } from "./options.ts";
@@ -25,7 +25,10 @@ export interface ToolContext {
 
 type ToolExtra = { _meta?: { progressToken?: string | number }; sendNotification(n: { method: "notifications/progress"; params: { progressToken: string | number; progress: number } }): Promise<void> };
 
-export function registerTools(mcp: McpServer, host: ShrikeHost, ctx: ToolContext = {}) {
+export function registerTools(mcp: McpServer, base: ShrikeHost, ctx: ToolContext = {}) {
+  const seen = new Map<string, number>(); // #52: [text#n] stays the same value for this whole session
+  const maskOpts = () => ({ keep: base.redactKeep?.(), seen });
+  const host = maskedHost(base, maskOpts);
   const tool = <S extends z.ZodRawShape>(
     name: string,
     description: string,
@@ -422,7 +425,7 @@ export function registerTools(mcp: McpServer, host: ShrikeHost, ctx: ToolContext
         const where = `${target.origin}${target.pathname}`;
         const liveSpec = { ...spec, url: target.href };
         await askOnce(`send ${where}`, `Send ${m} ${where} to your live site?`, reason ?? "Even a GET can change data on a live site (a sign out or unsubscribe link). Shrike asks once per path.", `The user declined ${m} ${url}. Don't retry it; find another way or explain why it is needed.`, { method: m, url: target.href });
-        return sentText(host.api ? await host.api.send(liveSpec, checks) : await host.sendRequest(liveSpec), m, url);
+        return sentText(host.api ? await host.api.send(liveSpec, checks) : await host.sendRequest(liveSpec), m, url, true);
       }
       if (m !== "GET" && m !== "HEAD") {
         const ok = await host.requestApproval({
@@ -437,9 +440,10 @@ export function registerTools(mcp: McpServer, host: ShrikeHost, ctx: ToolContext
     },
   );
 
-  async function sentText(r: { response: HttpResponseSpec; actionId?: string; assertions?: ApiAssertionResult[] }, m: string, url: string): Promise<string> {
+  async function sentText(r: { response: HttpResponseSpec; actionId?: string; assertions?: ApiAssertionResult[] }, m: string, url: string, live = false): Promise<string> {
     const { response, actionId } = r;
-    const resBody = response.body.length > MAX_BODY_CHARS ? `${response.body.slice(0, MAX_BODY_CHARS)}…[truncated]` : response.body;
+    const body = live ? maskText(response.body, maskOpts()) : response.body; // #52
+    const resBody = body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}…[truncated]` : body;
     const checks = r.assertions?.length ? `\nAssertions: ${r.assertions.filter((a) => a.ok).length} of ${r.assertions.length} passed\n${r.assertions.map((a) => `${a.ok ? "PASS" : "FAIL"} ${a.expr} ${a.op}${a.value ? ` ${a.value}` : ""}${a.ok ? "" : ` (got ${a.error ?? a.actual ?? "nothing"})`}`).join("\n")}\n` : "";
     const head = `HTTP ${response.status} ${response.statusText} (${Math.round(response.durationMs)}ms)${checks}\nBody:\n${resBody || "(empty)"}`;
     return actionId ? `${head}\n\n${(await waitText(actionId, `Sent ${m} ${url}`)).text}` : head;
@@ -921,8 +925,22 @@ function stepLine(s: { action: string; ref?: string; name?: string; text?: strin
   return `Wait ${s.ms ?? 500}ms`;
 }
 
-// #53 seam for #51 and #52: live tool output masks emails as [email#n] before it reaches the model.
-// ponytail: emails only, numbered per output. Upgrade: #51's detectors (phones, Vercel bypass token) and #52's maskValues here.
+// #52: live trips reach the agent with values masked; local trips keep theirs. Object.create keeps every other host method.
+// ponytail: search_events still matches the real values, so a hit can say a value exists. Upgrade: search the masked text.
+function maskedHost(h: ShrikeHost, o: () => MaskOptions): ShrikeHost {
+  const view = (v: ActionView | undefined) => (v?.root?.live ? maskAction(v, o()) : v);
+  const event = (e: DebugEvent | undefined) => (e?.live ? maskValues(e, o()) : e);
+  return Object.assign(Object.create(h) as ShrikeHost, {
+    listActions: () => h.listActions().map((v) => view(v)!),
+    getAction: (id: string) => view(h.getAction(id)),
+    getEvent: (id: string) => event(h.getEvent(id)),
+    searchEvents: (q: string) => h.searchEvents(q).map((e) => event(e)!),
+    waitForAction: async (id: string, ms?: number) => view(await h.waitForAction(id, ms)),
+  });
+}
+
+// #53 seam for #51: live tool output masks emails as [email#n] before it reaches the model.
+// ponytail: emails only, numbered per output. Upgrade: #51's detectors (phones, Vercel bypass token) here.
 function maskPersonal(s: string): string {
   const seen = new Map<string, number>();
   return s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, (m) => {

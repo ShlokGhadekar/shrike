@@ -1,4 +1,4 @@
-import { BrowserWindow, webContents } from "electron";
+import { BrowserWindow, session, webContents } from "electron";
 import type { AppSide, ApprovalRequest, HttpRequestSpec, MemoryNote, ProjectInfo, RunStatus, ShrikeEvents, ShrikeHost } from "@shrike/schema";
 import { AppView } from "./app-view.ts";
 import { notePatch } from "./issue.ts";
@@ -36,6 +36,7 @@ export const store = new Store({
   projectRoot: () => project?.root ?? "",
   projectName: () => project?.name,
   declaredPlaces: () => shiftPlaces(project?.declaredPlaces),
+  redactRules: () => project?.redact,
   onUpdate: (views) => emit("actions:update", views),
   onHello: (msg) => {
     if (msg.source !== "server") return;
@@ -97,14 +98,27 @@ export const appView = new AppView({
   appUrl: () => (runner.status.state === "running" ? (side === "live" && project?.liveUrl) || runner.status.url : undefined),
   live: () => liveRun(),
   traceparent: () => !liveRun() || readConfig(project!.root).liveTraceparent === true, // #50: off on live origins unless the project turns it on
+  bypassServiceWorker: () => liveRun() && readConfig(project!.root).liveServiceWorker !== true, // #55: on for live sites unless the project keeps the worker
+  // #55: the credentials go straight to Chromium, which keeps them in memory for this session; Shrike never stores them.
+  onLogin: (host, realm) =>
+    new Promise((resolve) => {
+      const id = randomHex(8);
+      logins.set(id, resolve);
+      emit("live:login", { id, host, realm });
+    }),
+  onNotice: (text) => (emit("live:notice", text), queueOutput(null, `\r\n[shrike] ${text}\r\n`)),
+  rightSession: (guest) => guest.session === session.fromPartition(appPartition()),
   onMessage: (msg) => store.handle(msg),
   onWarning: (text) => queueOutput(null, text),
 });
 
+/** #55: the app pane's partition: the live site's own for a live project or the Live side, else the local one (renderer: stores/project.ts appPartition). */
+export const appPartition = (): string => (project?.livePartition && (liveUrlOf(project) || side === "live") ? project.livePartition : "persist:shrike-app");
+
 /** #54: the app pane shows a live site (a live project's run, or the Live side of a local run), not a local dev server. */
 export const liveRun = (): boolean => !!project && runner.status.state === "running" && (!!liveUrlOf(project) || side === "live");
 
-/** #62: a running project with a liveUrl moves its app pane between the local run and the live site (same webview; its own partition is #55). */
+/** #62: a running project with a liveUrl moves its app pane between the local run and the live site (the webview remounts in the side's partition, #55). */
 export async function setAppSide(next: AppSide): Promise<AppSide> {
   const p = requireProject();
   if (next === side) return side;
@@ -115,8 +129,26 @@ export async function setAppSide(next: AppSide): Promise<AppSide> {
     if (!(await liveConsent(p.root, p.liveUrl, win))) return side;
   }
   side = next;
+  emit("run:status", runner.status); // the app window asks for its partition again
   await appView.load();
   return side;
+}
+
+const logins = new Map<string, (login: { username: string; password: string } | null) => void>();
+export function answerLiveLogin(id: string, login: { username: string; password: string } | null): void {
+  logins.get(id)?.(login);
+  logins.delete(id);
+}
+
+/** #55: forget everything the live site stored (cookies, storage, cache, basic-auth), then open it again. */
+export async function signOutLive(): Promise<void> {
+  const p = requireProject();
+  if (!p.livePartition) throw new Error("This project has no live site.");
+  const ses = session.fromPartition(p.livePartition);
+  await ses.clearStorageData();
+  await ses.clearAuthCache();
+  await ses.clearCache();
+  if (liveRun()) await appView.reload().catch(() => {});
 }
 
 const ingest = () => (ingestP ??= startIngest((msg) => store.handle(msg), inspector)); // inspector: I place inspector
@@ -359,6 +391,7 @@ export const host: ShrikeHost = {
   waitForAction: (id, timeoutMs) => store.waitForAction(id, timeoutMs),
   requestApproval,
   liveOrigins,
+  redactKeep: () => project?.redact?.keep,
   proposePatch: (files, rationale, from) => patches.proposePatch(patchDeps(), files, rationale, from),
   revertPatch,
   // ponytail: the agent package turns report_findings calls into "findings" steps itself, so nothing to do here.

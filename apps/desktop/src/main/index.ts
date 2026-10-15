@@ -9,7 +9,7 @@ import { reapOrphans, trackGroups } from "./runner.ts";
 import { registerIpc } from "./ipc.ts";
 import { automated, headless } from "./headless.ts";
 import { banner } from "./banner.ts";
-import { placeAppWindow } from "./app-view.ts";
+import { placeAppWindow, plainUserAgent } from "./app-view.ts";
 import { adoptUserPath, isMac } from "./platform.ts";
 import { writeAtomicSync } from "./state-file.ts";
 
@@ -38,6 +38,8 @@ if (!primary) app.quit();
 app.on("second-instance", () => win && (win.isMinimized() && win.restore(), win.focus()));
 
 if (headless && process.platform === "darwin") app.setActivationPolicy("accessory");
+// #55: app-wide, because a window.open popup ignores its session's user agent; sign-in providers see plain Chrome.
+app.userAgentFallback = plainUserAgent(app.userAgentFallback);
 // Dev only, a real terminal only: never in tests, headless runs or piped logs.
 if (process.env.ELECTRON_RENDERER_URL && process.stdout.isTTY && !headless && !automated) process.stdout.write(banner());
 

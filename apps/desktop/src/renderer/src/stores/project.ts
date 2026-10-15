@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { FileNode, ProcessSpec, ProjectInfo } from "@shrike/schema";
+import type { AppSide, FileNode, ProcessSpec, ProjectInfo } from "@shrike/schema";
 import { call } from "../lib/api.ts";
 import { useUi } from "./ui.ts";
 
@@ -95,6 +95,10 @@ export const useProject = create<ProjectState>((set, get) => ({
 
 /** #54: a live URL and nothing to start: Run opens the site (main's liveUrlOf). */
 export const isLiveSite = (p: ProjectInfo | null): boolean => !!p?.liveUrl && !p.devCommand.trim() && !p.processes.some((x) => x.command.trim());
+
+/** #55: the app pane's session: the live site's own (main names it) for a live project or the Live side (#62), else the local one.
+ * Same rule as main's appPartition. A webview can't change partition, so key the webview by it. */
+export const appPartition = (p: ProjectInfo | null, side: AppSide = "local"): string => ((isLiveSite(p) || side === "live") && p?.livePartition) || "persist:shrike-app";
 
 /** D12: an explicit open lands on the setup screen first when there is something to check (several processes, or no web page). */
 function opened(p: ProjectInfo): void {

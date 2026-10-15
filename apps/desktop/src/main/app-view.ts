@@ -1,4 +1,5 @@
 import type { BrowserWindow, BrowserWindowConstructorOptions, WebContents } from "electron";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { AppSnapshot, IngestMessage, PointPick } from "@shrike/schema";
@@ -25,6 +26,10 @@ export interface AppViewOptions {
   appUrl(): string | undefined; // set while the run is "running"
   live?(): boolean; // #54: the page is a live site; its events are marked live
   traceparent?(): boolean; // #54: add traceparent to same-origin requests (default on)
+  bypassServiceWorker?(): boolean; // #55: requests skip the site's service worker
+  onLogin?(host: string, realm: string): Promise<{ username: string; password: string } | null>; // #55: basic auth; null cancels
+  onNotice?(text: string): void; // #55: a plain message the user should see
+  rightSession?(guest: WebContents): boolean; // #55: false while the pane still has the other side's session
   onMessage(msg: IngestMessage): void;
   onWarning(text: string): void;
 }
@@ -34,6 +39,16 @@ export function popupPolicy(url: string): { action: "deny" } | { action: "allow"
   if (!/^https?:/i.test(url) && url !== "about:blank") return { action: "deny" };
   return { action: "allow", overrideBrowserWindowOptions: { show: !headless, width: 520, height: 680, autoHideMenuBar: true, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } } };
 }
+
+/** #55: a live site's own session, one per host: its logins survive restarts and never mix with the local pane's cookies. */
+export const livePartition = (url: string): string => `persist:live-${createHash("sha256").update(new URL(url).host.toLowerCase()).digest("hex").slice(0, 16)}`;
+
+/** #55: Electron's user agent with only the browser's own tokens, so sign-in providers see plain Chrome (no Electron, no Shrike). */
+export const plainUserAgent = (ua: string): string => ua.replace(/ (?!(?:AppleWebKit|Chrome|Safari|Mobile)\/)[^\s()]+\/[^\s()]+/g, "");
+
+export const CERT_REFUSED = "This site's certificate isn't valid (it's self-signed, expired or for another address), so Shrike didn't open it. Shrike never trusts a bad certificate.";
+export const SIGN_IN_REFUSED = "This sign-in doesn't open inside Shrike. Try email sign-in or a test account.";
+const REFUSED = /[?&/]disallowed_useragent\b|accounts\.google\.com\/(?:v3\/)?signin\/rejected/; // Google's "this browser may not be secure"
 
 const rect = z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(100), height: z.number().int().min(100) });
 export const appWindowState = z.object({ displayId: z.number(), bounds: rect, fullScreen: z.boolean() });
@@ -65,6 +80,7 @@ export class AppView {
   private opts: AppViewOptions;
   private guest?: WebContents;
   private scriptId?: string;
+  private bypassing = false; // #55: the guest's debugger skips the service worker
   private queue: Promise<void> = Promise.resolve(); // serializes attach + load
   // ponytail: in memory, last 50 only. Upgrade: write to the project's .shrike folder.
   private shots = new Map<string, string>(); // root action id -> PNG data URL
@@ -86,7 +102,13 @@ export class AppView {
     // Sign-in popups (Firebase signInWithPopup, OAuth) need a real child window with its opener; it closes itself, or with the app.
     guest.setWindowOpenHandler(({ url }) => popupPolicy(url));
     const popups = new Set<BrowserWindow>();
-    guest.on("did-create-window", (w) => (popups.add(w), w.once("closed", () => popups.delete(w))));
+    guest.on("did-create-window", (w) => {
+      popups.add(w);
+      w.once("closed", () => popups.delete(w));
+      this.watchPage(w.webContents);
+      void this.recordPopup(w.webContents).catch(() => {});
+    });
+    this.watchPage(guest);
     guest.once("destroyed", () => {
       for (const w of popups) if (!w.isDestroyed()) w.close();
       if (this.guest === guest) this.guest = undefined;
@@ -109,13 +131,36 @@ export class AppView {
     }
   }
 
-  private onBinding(payload: string): void {
+  // #55: basic auth asks the user; a refused certificate or sign-in says so in plain words.
+  private watchPage(wc: WebContents): void {
+    wc.on("login", (e, details, info, cb) => {
+      if (info.isProxy || !this.opts.onLogin) return;
+      e.preventDefault();
+      this.opts.onLogin(new URL(details.url).host, info.realm).then((c) => (c ? cb(c.username, c.password) : cb()), () => cb());
+    });
+    wc.on("did-fail-load", (_e, code, _desc, _url, main) => main && code <= -200 && code > -300 && this.opts.onNotice?.(CERT_REFUSED)); // -2xx are certificate errors
+    wc.on("did-navigate", (_e, url) => REFUSED.test(url) && this.opts.onNotice?.(SIGN_IN_REFUSED));
+  }
+
+  // #55: a sign-in popup gets the pane's recorder and closure binding. ponytail: a popup's first page can load before the debugger
+  // reaches it and go unrecorded (Firebase opens about:blank first, so all of its pages are); every page after it is.
+  private async recordPopup(wc: WebContents): Promise<void> {
+    const source = await this.bundle();
+    if (!source || wc.isDestroyed()) return;
+    const d = wc.debugger;
+    d.on("message", (_e, method, params) => method === "Runtime.bindingCalled" && params?.name === "__shrikeEmit" && this.onBinding(String(params.payload), true));
+    d.attach("1.3");
+    // Sent in one go, in order, so they land before the popup's next page.
+    await Promise.all([d.sendCommand("Runtime.enable"), d.sendCommand("Page.enable"), d.sendCommand("Runtime.addBinding", { name: "__shrikeEmit" }), d.sendCommand("Page.addScriptToEvaluateOnNewDocument", { source })]);
+  }
+
+  private onBinding(payload: string, popup = false): void {
     let msg: IngestMessage | null = null;
     let raw: unknown;
     try {
       raw = JSON.parse(payload);
     } catch {}
-    if ((raw as { type?: unknown } | undefined)?.type === "point") return this.onPointMsg(raw);
+    if ((raw as { type?: unknown } | undefined)?.type === "point") return popup ? undefined : this.onPointMsg(raw);
     try {
       msg = parseIngest(raw);
     } catch {}
@@ -145,20 +190,29 @@ export class AppView {
       await d.sendCommand("Runtime.enable");
       await d.sendCommand("Page.enable");
       await d.sendCommand("Runtime.addBinding", { name: "__shrikeEmit" });
+      this.bypassing = false;
+    }
+    const bypass = this.opts.bypassServiceWorker?.() === true;
+    if (bypass || this.bypassing) {
+      await d.sendCommand("Network.enable");
+      await d.sendCommand("Network.setBypassServiceWorker", { bypass });
+      this.bypassing = bypass;
     }
     if (this.scriptId) await d.sendCommand("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.scriptId }).catch(() => {});
     this.scriptId = undefined;
-    let source: string;
-    try {
-      source = await readFile(this.opts.bundlePath, "utf8");
-    } catch {
-      this.opts.onWarning(`\r\n[shrike] Browser recording is off: ${this.opts.bundlePath} is missing. Run "pnpm --filter @shrike/browser-agent build".\r\n`);
-      return;
-    }
-    // #54: settings go into the script's own closure, never a window property a page could read or set.
-    source = withConfig(source, { traceparent: this.opts.traceparent?.() !== false });
+    const source = await this.bundle();
+    if (!source) return;
     const r = (await d.sendCommand("Page.addScriptToEvaluateOnNewDocument", { source })) as { identifier: string };
     this.scriptId = r.identifier;
+  }
+
+  private async bundle(): Promise<string | undefined> {
+    try {
+      // #54: settings go into the script's own closure, never a window property a page could read or set.
+      return withConfig(await readFile(this.opts.bundlePath, "utf8"), { traceparent: this.opts.traceparent?.() !== false });
+    } catch {
+      this.opts.onWarning(`\r\n[shrike] Browser recording is off: ${this.opts.bundlePath} is missing. Run "pnpm --filter @shrike/browser-agent build".\r\n`);
+    }
   }
 
   // Loads the app URL (or `url`) into the app pane with the recorder injected.
@@ -171,6 +225,7 @@ export class AppView {
   private async loadNow(url: string | undefined): Promise<void> {
     const guest = this.guest;
     if (!guest || guest.isDestroyed() || !url) throw new Error(NOT_OPEN);
+    if (this.opts.rightSession?.(guest) === false) return; // #55: the pane remounts in the right partition and loads then, so a live login never lands in the local one
     try {
       await this.ensureAttached(guest);
     } catch (err) {

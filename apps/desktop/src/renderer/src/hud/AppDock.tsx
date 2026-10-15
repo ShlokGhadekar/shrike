@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Crosshair, PanelLeftOpen, Play, RotateCw, SquareArrowOutUpRight } from "lucide-react";
 import { useRun } from "../stores/run.ts";
-import { isLiveSite, useProject } from "../stores/project.ts";
+import { appPartition, isLiveSite, useProject } from "../stores/project.ts";
 import { useUi } from "../stores/ui.ts";
 import { useFlows } from "../stores/flows.ts";
 import { call } from "../lib/api.ts";
@@ -30,6 +30,7 @@ export function AppDock() {
   const status = useRun((s) => s.status);
   const output = useRun((s) => s.output);
   const project = useProject((s) => s.project);
+  const partition = appPartition(project, useRun((s) => s.side));
   const ref = useRef<HTMLWebViewElement>(null);
   const [navUrl, setNavUrl] = useState<string | null>(null);
   const pointing = useUi((s) => s.pointing);
@@ -55,7 +56,7 @@ export function AppDock() {
       el.removeEventListener("did-navigate", onNav);
       el.removeEventListener("did-navigate-in-page", onNav);
     };
-  }, [detached]);
+  }, [detached, partition]);
 
   useEffect(() => {
     if (status.state !== "running") setNavUrl(null);
@@ -111,7 +112,7 @@ export function AppDock() {
             )}
           </div>
           <div className="relative min-h-0 overflow-hidden bg-void">
-            {!detached && <webview ref={ref} partition="persist:shrike-app" allowpopups={"true" as unknown as boolean /* React drops a boolean on an unknown attribute */} src="about:blank" className="absolute inset-0 h-full w-full" style={running && !noPage ? PAGE_CANVAS : undefined} />}
+            {!detached && <webview key={partition} ref={ref} partition={partition} allowpopups={"true" as unknown as boolean /* React drops a boolean on an unknown attribute */} src="about:blank" className="absolute inset-0 h-full w-full" style={running && !noPage ? PAGE_CANVAS : undefined} />}
             {window.__shrikeMock && running && !noPage && <MockApp />}
             {running && !noPage && <PointLayer />}
             {running && noPage && <NoPage />}

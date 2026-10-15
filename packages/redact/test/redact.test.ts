@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DebugEvent } from "@shrike/schema";
-import { entropy, redactCell, redactEvent, redactText } from "../src/index.ts";
+import { entropy, maskText, maskValues, redactCell, redactEvent, redactText } from "../src/index.ts";
 
 test("keys inside JSON keep the key and stay valid JSON", () => {
   const out = redactText('{"email":"a@b.co","password":"hunter2","nested":{"apiKey":"abc123","card":4242424242424242,"author":"Ann"},"maxTokens":100}');
@@ -174,4 +174,62 @@ test("a URL's port and path are not a secret (Firestore emulator channel)", () =
 test("nextjs-supabase: a React className is not a social security number", () => {
   assert.equal(redactText("{ className: 'inline-flex items-center', variant: undefined }"), "{ className: 'inline-flex items-center', variant: undefined }");
   assert.equal(redactText("{ userSsn: '123-45-6789' }"), "{ userSsn: '[redacted:userSsn]' }");
+});
+
+// #52: a Supabase `orders` answer with 5 rows of realistic personal data
+const ORDERS = JSON.stringify([
+  { id: 101, user_id: "550e8400-e29b-41d4-a716-446655440000", name: "Ada Lovelace", street: "12 Crescent Road", note: "Leave it by the blue door", status: "pending", total: 42.5, items: 3, paid: false, coupon: null },
+  { id: 102, user_id: "6f1c2b9a-3d4e-4f5a-8b6c-7d8e9f0a1b2c", name: "Grace Hopper", street: "4 Harbour Lane", note: "Call when outside", status: "paid", total: 19, items: 1, paid: true, coupon: "SPRING" },
+  { id: 103, user_id: "7a2d3c0b-4e5f-4a6b-9c7d-8e9f0a1b2c3d", name: "Alan Turing", street: "221 Wilmslow Road", note: "Gift wrap please", status: "pending", total: 7.25, items: 2, paid: false, coupon: null },
+  { id: 104, user_id: "8b3e4d1c-5f6a-4b7c-ad8e-9f0a1b2c3d4e", name: "Katherine Johnson", street: "9 Mercury Avenue, Apt 3", note: "", status: "shipped", total: 120, items: 5, paid: true, coupon: null },
+  { id: 105, user_id: "9c4f5e2d-6a7b-4c8d-be9f-0a1b2c3d4e5f", name: "Edsger Dijkstra", street: "1 Shortest Path", note: "No rush", status: "pending", total: 3, items: 1, paid: false, coupon: null },
+]);
+
+test("#52 maskValues: 5 rows of personal data lose names, streets and free text; ids, numbers, keys and enum words stay", () => {
+  const e: DebugEvent = {
+    id: "0000000000000003", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "db_query", name: "SELECT orders", startMs: 1, status: "ok", live: true,
+    http: { method: "GET", url: "/rest/v1/orders?select=*&status=eq.pending&email=eq.ada%40example.com", resBody: ORDERS },
+    db: { system: "postgres", statement: "SELECT orders", params: '["pending","eq.ada@example.com"]' },
+    change: { table: "orders", op: "update", count: 1, rows: [{ pk: "101", after: { id: 101, street: "12 Crescent Road", status: "paid" } }] },
+  };
+  const before = JSON.stringify(e);
+  const r = maskValues(e);
+  assert.equal(JSON.stringify(e), before, "never mutates");
+  const out = r.http!.resBody!;
+  for (const word of ["Ada", "Lovelace", "Grace", "Crescent", "Harbour", "Wilmslow", "Mercury", "blue door", "Gift wrap", "No rush", "Call when"]) assert.ok(!out.includes(word), word);
+  const rows = JSON.parse(out) as Record<string, unknown>[];
+  assert.deepEqual(rows.map((x) => x.id), [101, 102, 103, 104, 105]);
+  assert.deepEqual(rows.map((x) => x.status), ["pending", "paid", "pending", "shipped", "pending"]);
+  assert.equal(rows[0]!.user_id, "550e8400-e29b-41d4-a716-446655440000");
+  assert.deepEqual([rows[0]!.total, rows[0]!.items, rows[0]!.paid, rows[0]!.coupon, rows[1]!.coupon, rows[3]!.note], [42.5, 3, false, null, "SPRING", ""]);
+  assert.deepEqual(Object.keys(rows[0]!), Object.keys((JSON.parse(ORDERS) as Record<string, unknown>[])[0]!));
+  assert.match(String(rows[0]!.name), /^\[text#\d+\]$/);
+  const n = /email=(\[text#\d+\])$/.exec(r.http!.url)?.[1];
+  assert.ok(n && r.http!.url.startsWith("/rest/v1/orders?select=*&status=eq.pending&email="));
+  assert.equal(r.db!.params, `["pending","${n}"]`, "the same value keeps its number within an event");
+  assert.equal(r.change!.rows![0]!.after!.status, "paid");
+  assert.match(String(r.change!.rows![0]!.after!.street), /^\[text#\d+\]$/);
+});
+
+test("#52 maskText: keep list, inspect previews, form data; a 25-character word goes", () => {
+  assert.equal(maskText("{ name: 'Ada Lovelace', plan: 'Team plan', role: 'admin' }", { keep: ["plan"] }), "{ name: '[text#1]', plan: 'Team plan', role: 'admin' }");
+  assert.equal(maskText("name=Ada+Lovelace&page=2"), "name=[text#1]&page=2");
+  assert.equal(maskText('{"code":"ABCDEFGHIJKLMNOPQRSTUVWXY"}'), '{"code":"[text#1]"}');
+  assert.equal(maskText('{"code":"ABCDEFGHIJKLMNOPQRSTUVWX"}'), '{"code":"ABCDEFGHIJKLMNOPQRSTUVWX"}');
+  assert.equal(maskText('{"phone":"555-123-4567","at":"2026-10-15T12:00:00Z"}'), '{"phone":"[text#1]","at":"2026-10-15T12:00:00Z"}');
+  assert.equal(maskText("[redacted:password] and '[text#4]', Bob's 'Ann Lee'"), "[redacted:password] and '[text#4]', Bob's '[text#1]'");
+  const seen = new Map<string, number>();
+  assert.equal(maskText('"Ada Lovelace" "Grace Hopper"', { seen }), '"[text#1]" "[text#2]"');
+  assert.equal(maskText("'Grace Hopper'", { seen }), "'[text#2]'", "a shared map keeps numbers across calls");
+});
+
+test("#52 user rules: redact.keys and redact.headers are redacted at the store like the built-in names", () => {
+  const rules = { keys: ["address"], headers: ["x-tenant"] };
+  assert.equal(redactText('{"address":"12 Crescent Road","city":"Leeds"}', rules), '{"address":"[redacted:address]","city":"Leeds"}');
+  assert.equal(redactText('{"address":"12 Crescent Road"}'), '{"address":"12 Crescent Road"}', "no rules, no change");
+  assert.equal(redactCell("home_address", "x", rules), "[redacted:home_address]");
+  const e: DebugEvent = { id: "0000000000000004", traceId: "0af7651916cd43dd8448eb211c80319c", origin: "browser", kind: "http_request", name: "GET /x", startMs: 1, status: "ok", http: { method: "GET", url: "/x?address=here", reqHeaders: { "X-Tenant": "acme", accept: "*/*" } } };
+  const r = redactEvent(e, rules);
+  assert.deepEqual(r.http!.reqHeaders, { "X-Tenant": "[redacted:x-tenant]", accept: "*/*" });
+  assert.equal(r.http!.url, "/x?address=[redacted:address]");
 });

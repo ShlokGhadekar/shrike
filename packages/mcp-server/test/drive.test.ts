@@ -132,3 +132,30 @@ test("#53: a live site is read-only, with one card per path or scenario, and per
     await server.close();
   }
 });
+
+test("#52: live trips reach the agent with values masked; local trips keep theirs", async () => {
+  const ev = (id: string) => ({ id, traceId: "t".repeat(32), origin: "browser", kind: "http_request", name: "GET /rest/v1/orders", startMs: 1, status: "ok", http: { method: "GET", url: "/rest/v1/orders", resBody: '[{"id":7,"name":"Ada Lovelace","plan":"Team plan","status":"pending"}]' }, ...(id === "live" ? { live: true } : {}) });
+  const host = {
+    projectRoot: () => os.tmpdir(),
+    listActions: () => [],
+    getEvent: ev,
+    liveOrigins: () => ["https://demo.example.com"],
+    redactKeep: () => ["plan"],
+    requestApproval: async () => true,
+    sendRequest: async () => ({ response: { status: 200, statusText: "OK", headers: {}, body: '{"name":"Grace Hopper","status":"paid"}', durationMs: 1 }, actionId: "" }),
+  } as unknown as ShrikeHost;
+  const server = await startMcpServer(host);
+  const c = new Client({ name: "shrike", version: "0" });
+  await c.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { Authorization: `Bearer ${server.token}`, [INTERNAL_HEADER]: "1" } } }));
+  const call = async (name: string, args: Record<string, unknown>) => ((await c.callTool({ name, arguments: args })).content as { text: string }[]).map((x) => x.text).join("\n");
+  try {
+    const live = await call("get_event", { eventId: "live" });
+    assert.doesNotMatch(live, /Ada/);
+    assert.match(live, /\[text#1\].*Team plan.*pending/);
+    assert.match(await call("get_event", { eventId: "local" }), /Ada Lovelace/, "a local trip in the same project keeps its values");
+    assert.match(await call("send_request", { method: "GET", url: "/api/me" }), /"name":"\[text#2\]","status":"paid"/);
+  } finally {
+    await c.close();
+    await server.close();
+  }
+});

@@ -1,12 +1,9 @@
-import type { Cell, DebugEvent } from "@shrike/schema";
+import type { ActionView, Cell, DebugEvent, RedactRules, TimelineNode } from "@shrike/schema";
 
 const SENSITIVE_HEADERS = new Set(["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"]);
 // "auth" and "authorization", but not "author"/"authorId"
 const KEY = String.raw`pass(?:word)?|passwd|secret|token|api[-_]?key|auth(?!or(?!i[zs]))|session|credential|private[-_]?key|card|cvv|(?<!cla)ssn`; // not "className"
-const KEY_RE = new RegExp(KEY, "i");
 const NUMERIC_KEY_RE = /card|cvv|ssn/i;
-// bounded so long identifier runs stay linear
-const IDENT = String.raw`[\w$.-]{0,40}(?:${KEY})[\w$.-]{0,40}`;
 
 const label = (name: string) => `[redacted:${name}]`;
 const isRedacted = (v: string) => v.startsWith("[redacted");
@@ -23,10 +20,41 @@ const SHAPES: [RegExp, string][] = [
   [/\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]{5,}/g, "jwt"],
 ];
 
-const QUOTED = ["\"", "'", "`"].map(
-  (q) => new RegExp(String.raw`(?<![\w$.-])([${q === "`" ? "'\"" : q}]?)(${IDENT})\1(\s*[:=]\s*)${q}((?:[^${q}\\\n]|\\.)*)${q}`, "gi"),
-);
-const UNQUOTED = new RegExp(String.raw`(?<![\w$.-])(["']?)(${IDENT})\1(\s*[:=]\s*)(?!["'\x60\[{(]|(?:Bearer|Basic)\s)([A-Za-z0-9_\-+/.~%]+)`, "gi");
+// A key pattern's regexes; the identifier run is bounded so long runs stay linear.
+function keyRes(key: string) {
+  const ident = String.raw`[\w$.-]{0,40}(?:${key})[\w$.-]{0,40}`;
+  return {
+    re: new RegExp(key, "i"),
+    quoted: ["\"", "'", "`"].map((q) => new RegExp(String.raw`(?<![\w$.-])([${q === "`" ? "'\"" : q}]?)(${ident})\1(\s*[:=]\s*)${q}((?:[^${q}\\\n]|\\.)*)${q}`, "gi")),
+    unquoted: new RegExp(String.raw`(?<![\w$.-])(["']?)(${ident})\1(\s*[:=]\s*)(?!["'\x60\[{(]|(?:Bearer|Basic)\s)([A-Za-z0-9_\-+/.~%]+)`, "gi"),
+  };
+}
+type KeyRes = ReturnType<typeof keyRes>;
+const BUILT_IN = keyRes(KEY);
+const KEY_RE = BUILT_IN.re;
+// #52: the user's `redact.keys`, matched like the built-in names; compiled once per list
+let userKeys: { src: string; res: KeyRes } | undefined;
+function userRes(rules?: RedactRules): KeyRes | undefined {
+  const names = rules?.keys?.filter(Boolean);
+  if (!names?.length) return undefined;
+  const src = names.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  if (userKeys?.src !== src) userKeys = { src, res: keyRes(src) };
+  return userKeys.res;
+}
+
+function byKey(out: string, k: KeyRes): string {
+  for (const re of k.quoted) {
+    out = out.replace(re, (m, q: string, key: string, sep: string, value: string) => {
+      if (!value || isRedacted(value)) return m;
+      const quote = m.at(-1)!;
+      return `${q}${key}${q}${sep}${quote}${label(key)}${quote}`;
+    });
+  }
+  return out.replace(k.unquoted, (m, q: string, key: string, sep: string, value: string) => {
+    if (LITERAL.test(value) && !(NUMERIC_KEY_RE.test(key) && /^\d{3,}$/.test(value))) return m;
+    return `${q}${key}${q}${sep}${q === '"' ? `"${label(key)}"` : label(key)}`;
+  });
+}
 const LITERAL = /^(?:true|false|null|undefined|NaN|-?\d+(?:\.\d+)?)$/;
 
 export function entropy(s: string): number {
@@ -51,7 +79,7 @@ const looksSecret = (v: string): boolean =>
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const looksToken = (v: string): boolean => /^[A-Za-z0-9_-]{32,512}$/.test(v) && /\d/.test(v) && /[a-z]/i.test(v) && !UUID.test(v) && entropy(v) > 3;
 
-export function redactText(s: string): string {
+export function redactText(s: string, rules?: RedactRules): string {
   if (!s) return s;
   let out = s;
   // connection strings: keep the user, mask the password
@@ -59,17 +87,9 @@ export function redactText(s: string): string {
     isRedacted(pass) ? m : `${scheme}${user}:${label("password")}@`,
   );
   out = out.replace(/\b(Bearer|Basic)\s+(?!\[redacted)[A-Za-z0-9._~+/=-]{8,}/g, (_m, kind: string) => `${kind} ${label("token")}`);
-  for (const re of QUOTED) {
-    out = out.replace(re, (m, q: string, key: string, sep: string, value: string) => {
-      if (!value || isRedacted(value)) return m;
-      const quote = m.at(-1)!;
-      return `${q}${key}${q}${sep}${quote}${label(key)}${quote}`;
-    });
-  }
-  out = out.replace(UNQUOTED, (m, q: string, key: string, sep: string, value: string) => {
-    if (LITERAL.test(value) && !(NUMERIC_KEY_RE.test(key) && /^\d{3,}$/.test(value))) return m;
-    return `${q}${key}${q}${sep}${q === '"' ? `"${label(key)}"` : label(key)}`;
-  });
+  out = byKey(out, BUILT_IN);
+  const user = userRes(rules);
+  if (user) out = byKey(out, user);
   for (const [re, name] of SHAPES) out = out.replace(re, label(name));
   // high entropy: whole quoted values, and values after = or :
   out = out.replace(/(["'`])([A-Za-z0-9+/_=.-]{24,512})\1/g, (m, q: string, v: string) => (looksSecret(v) || looksToken(v) ? `${q}${label("secret")}${q}` : m));
@@ -79,53 +99,134 @@ export function redactText(s: string): string {
   return out;
 }
 
-const redactHeaders = (h: Record<string, string> | undefined) => {
+const redactHeaders = (h: Record<string, string> | undefined, rules?: RedactRules) => {
   if (!h) return h;
+  const extra = new Set(rules?.headers?.map((x) => x.toLowerCase()));
+  const user = userRes(rules)?.re;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h)) {
     const name = k.toLowerCase();
-    out[k] = SENSITIVE_HEADERS.has(name) || KEY_RE.test(name) ? label(name) : redactText(v);
+    out[k] = SENSITIVE_HEADERS.has(name) || KEY_RE.test(name) || extra.has(name) || user?.test(name) ? label(name) : redactText(v, rules);
   }
   return out;
 };
 
-const opt = (s: string | undefined) => (s === undefined ? s : redactText(s));
-
 /** I: a value from a database row or cache entry; a column or key that names a secret is masked whole. */
-export function redactCell(name: string, v: Cell): Cell {
-  if (v === null || typeof v !== "string") return v !== null && KEY_RE.test(name) ? label(name.toLowerCase()) : v;
-  return KEY_RE.test(name) && !isRedacted(v) ? label(name.toLowerCase()) : redactText(v);
+export function redactCell(name: string, v: Cell, rules?: RedactRules): Cell {
+  const secret = KEY_RE.test(name) || !!userRes(rules)?.re.test(name);
+  if (v === null || typeof v !== "string") return v !== null && secret ? label(name.toLowerCase()) : v;
+  return secret && !isRedacted(v) ? label(name.toLowerCase()) : redactText(v, rules);
 }
 
-export function redactRow(row: Record<string, Cell>): Record<string, Cell> {
-  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, redactCell(k, v)]));
+export function redactRow(row: Record<string, Cell>, rules?: RedactRules): Record<string, Cell> {
+  return Object.fromEntries(Object.entries(row).map(([k, v]) => [k, redactCell(k, v, rules)]));
 }
 
-export function redactEvent(e: DebugEvent): DebugEvent {
-  const r: DebugEvent = { ...e, name: redactText(e.name) };
+/** rules: the user's `redact.keys` and `redact.headers` from .shrike/config.json, redacted like the built-in names. */
+export function redactEvent(e: DebugEvent, rules?: RedactRules): DebugEvent {
+  const t = (s: string) => redactText(s, rules);
+  const opt = (s: string | undefined) => (s === undefined ? s : t(s));
+  const r: DebugEvent = { ...e, name: t(e.name) };
   if (e.http) {
-    r.http = { ...e.http, url: redactText(e.http.url) };
-    if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders);
-    if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders);
-    if (e.http.serverTiming) r.http.serverTiming = e.http.serverTiming.map((t) => (t.desc !== undefined ? { ...t, desc: redactText(t.desc) } : t));
-    if (e.http.reqBody !== undefined) r.http.reqBody = redactText(e.http.reqBody);
-    if (e.http.resBody !== undefined) r.http.resBody = redactText(e.http.resBody);
+    r.http = { ...e.http, url: t(e.http.url) };
+    if (e.http.reqHeaders) r.http.reqHeaders = redactHeaders(e.http.reqHeaders, rules);
+    if (e.http.resHeaders) r.http.resHeaders = redactHeaders(e.http.resHeaders, rules);
+    if (e.http.serverTiming) r.http.serverTiming = e.http.serverTiming.map((x) => (x.desc !== undefined ? { ...x, desc: t(x.desc) } : x));
+    if (e.http.reqBody !== undefined) r.http.reqBody = t(e.http.reqBody);
+    if (e.http.resBody !== undefined) r.http.resBody = t(e.http.resBody);
   }
   if (e.db) {
-    r.db = { ...e.db, statement: redactText(e.db.statement) };
-    if (e.db.params !== undefined) r.db.params = redactText(e.db.params);
+    r.db = { ...e.db, statement: t(e.db.statement) };
+    if (e.db.params !== undefined) r.db.params = t(e.db.params);
   }
-  if (e.log) r.log = { ...e.log, message: redactText(e.log.message) };
+  if (e.log) r.log = { ...e.log, message: t(e.log.message) };
   if (e.error) {
-    r.error = { ...e.error, message: redactText(e.error.message) };
-    if (e.error.type !== undefined) r.error.type = redactText(e.error.type);
-    if (e.error.stack !== undefined) r.error.stack = redactText(e.error.stack);
+    r.error = { ...e.error, message: t(e.error.message) };
+    if (e.error.type !== undefined) r.error.type = t(e.error.type);
+    if (e.error.stack !== undefined) r.error.stack = t(e.error.stack);
   }
-  if (e.cache?.key !== undefined) r.cache = { ...e.cache, key: redactText(e.cache.key) };
-  if (e.caller) r.caller = { ...e.caller, label: redactText(e.caller.label), ...(e.caller.command !== undefined ? { command: redactText(e.caller.command) } : {}) };
-  if (e.change?.rows) r.change = { ...e.change, rows: e.change.rows.map((x) => ({ ...x, ...(x.before ? { before: redactRow(x.before) } : {}), ...(x.after ? { after: redactRow(x.after) } : {}) })) };
-  if (e.args) r.args = e.args.map(redactText);
+  if (e.cache?.key !== undefined) r.cache = { ...e.cache, key: t(e.cache.key) };
+  if (e.caller) r.caller = { ...e.caller, label: t(e.caller.label), ...(e.caller.command !== undefined ? { command: t(e.caller.command) } : {}) };
+  if (e.change?.rows) r.change = { ...e.change, rows: e.change.rows.map((x) => ({ ...x, ...(x.before ? { before: redactRow(x.before, rules) } : {}), ...(x.after ? { after: redactRow(x.after, rules) } : {}) })) };
+  if (e.args) r.args = e.args.map(t);
   if (e.returned !== undefined) r.returned = opt(e.returned);
   if (e.stack !== undefined) r.stack = opt(e.stack);
   return r;
+}
+
+// #52: value masking where a live trip leaves the screen (REC clips, cards, links, .shriketrace, live agent tool output).
+// Never at the store: the local user keeps seeing real values.
+
+export interface MaskOptions {
+  keep?: string[]; // keys, columns and query names whose values stay (`redact.keep`)
+  seen?: Map<string, number>; // share one across calls to keep [text#n] stable beyond one trip
+}
+
+const PII = /[^\s@]+@[^\s@]+\.[a-z]{2,}|^\+\d|\d{3}[-.)]\s?\d{3}[-.]\d{4}/i;
+const PLACEHOLDER = /^\[(?:redacted|text#|email#)/;
+
+/** A value that stays when masked: empty, a placeholder, a UUID or number, or a short enum-like word ("pending": no spaces, 24 characters or fewer, no email or phone). */
+const keepsValue =(v: string): boolean => !v || PLACEHOLDER.test(v) || UUID.test(v) || /^-?\d+(?:\.\d+)?$/.test(v) || (v.length <= 24 && !/\s/.test(v) && !PII.test(v));
+
+// A quoted string that isn't a key (not followed by a colon); the key before it, if any, decides `keep`.
+// ponytail: quoted values only, so free text outside quotes (a log line's own words) stays. Upgrade: mask log text whole.
+const LIT = /(?<![\w\\])(["'`])((?:\\.|(?!\1)[^\\\n])*)\1(?!\w)/g;
+const FORM = /^[\w.%+-]+=[^\s&]*(?:&[\w.%+-]+=[^\s&]*)*$/;
+
+function masker(o: MaskOptions = {}) {
+  const keep = new Set(o.keep?.map((k) => k.toLowerCase()));
+  const seen = o.seen ?? new Map<string, number>();
+  const one = (v: string, key?: string): string => {
+    if (keepsValue(v) || (key !== undefined && keep.has(key.toLowerCase()))) return v;
+    if (!seen.has(v)) seen.set(v, seen.size + 1);
+    return `[text#${seen.get(v)}]`;
+  };
+  const query = (q: string) =>
+    q.replace(/([^&=?#\s]+)=([^&#\s]*)/g, (m, k: string, v: string) => {
+      let d = v;
+      try {
+        d = decodeURIComponent(v.replace(/\+/g, " "));
+      } catch {}
+      const out = one(d, k);
+      return out === d ? m : `${k}=${out}`;
+    });
+  const url = (u: string) => (u.includes("?") ? `${u.slice(0, u.indexOf("?") + 1)}${query(u.slice(u.indexOf("?") + 1))}` : u);
+  const quoted = (s: string) =>
+    s.replace(LIT, (m, q: string, v: string, at: number, all: string) => {
+      if (/^\s*:/.test(all.slice(at + m.length, at + m.length + 8))) return m;
+      const key = /([\w$-]+)["'`]?\s*[:=]\s*$/.exec(all.slice(Math.max(0, at - 64), at))?.[1];
+      const out = one(v, key);
+      return out === v ? m : `${q}${out}${q}`;
+    });
+  const text = (s: string) => (FORM.test(s) ? query(s) : quoted(s));
+  const row = (r: Record<string, Cell>) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "string" ? one(v, k) : v]));
+  const event = (e: DebugEvent): DebugEvent => {
+    const r: DebugEvent = { ...e, name: e.kind === "db_query" ? quoted(e.name) : url(e.name) };
+    if (e.http) {
+      r.http = { ...e.http, url: url(e.http.url) };
+      if (e.http.reqBody !== undefined) r.http.reqBody = text(e.http.reqBody);
+      if (e.http.resBody !== undefined) r.http.resBody = text(e.http.resBody);
+    }
+    if (e.db) r.db = { ...e.db, statement: quoted(e.db.statement), ...(e.db.params !== undefined ? { params: quoted(e.db.params) } : {}) };
+    if (e.change?.rows) r.change = { ...e.change, rows: e.change.rows.map((x) => ({ ...x, ...(x.before ? { before: row(x.before) } : {}), ...(x.after ? { after: row(x.after) } : {}) })) };
+    if (e.log) r.log = { ...e.log, message: quoted(e.log.message) };
+    if (e.caller?.command !== undefined) r.caller = { ...e.caller, command: quoted(e.caller.command) };
+    if (e.args) r.args = e.args.map(quoted);
+    if (e.returned !== undefined) r.returned = quoted(e.returned);
+    return r;
+  };
+  return { text, event, url };
+}
+
+/** #52: string values in bodies, query values, SQL params, args and row cells become [text#n]; keys, numbers, ids and enum-like words stay. Pure. */
+export const maskValues = (e: DebugEvent, o?: MaskOptions): DebugEvent => masker(o).event(e);
+
+/** maskValues over a body or other text (JSON, form data, util.inspect previews). */
+export const maskText = (s: string, o?: MaskOptions): string => masker(o).text(s);
+
+/** maskValues over a whole trip, numbered once so the same value reads the same everywhere in it. */
+export function maskAction(v: ActionView, o?: MaskOptions): ActionView {
+  const m = masker(o);
+  const node = (n: TimelineNode): TimelineNode => ({ event: m.event(n.event), children: n.children.map(node) });
+  return { ...v, label: m.url(v.label), root: m.event(v.root), tree: v.tree.map(node) };
 }

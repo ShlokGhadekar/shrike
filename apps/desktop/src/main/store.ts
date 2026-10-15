@@ -29,6 +29,7 @@ export interface StoreOptions {
   loadText?(url: string): Promise<string>;
   projectName?(): string | undefined; // client lane label; else the project folder name
   declaredPlaces?(): ProjectInfo["declaredPlaces"]; // D8; else read from .shrike/config.json
+  redactRules?(): ProjectInfo["redact"]; // #52: the user's redact.keys and redact.headers, in every mode
 }
 
 type Declared = NonNullable<ProjectInfo["declaredPlaces"]>;
@@ -93,7 +94,7 @@ export class Store {
   }
 
   private add(raw: DebugEvent): void {
-    const e = redactEvent(clampBodies(raw));
+    const e = redactEvent(clampBodies(raw), this.opts.redactRules?.());
     e.traceId = this.aliases.get(e.traceId) ?? e.traceId;
     if (e.source && (e.origin === "browser" || isAbsolute(e.source.file))) e.source = { ...e.source, file: relativize(e.source.file, this.opts.projectRoot()) }; // OpenTelemetry SDKs send absolute paths
     if ((e.kind === "http_request" || e.kind === "db_query" || e.kind === "user_action") && e.origin === "browser" && e.stack) {

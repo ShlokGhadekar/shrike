@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "pnpm --filter @shrike/browser-agent build && pnpm --filter @shrike/desktop dev",
     "build": "pnpm --filter @shrike/browser-agent build && pnpm --filter @shrike/desktop build",
-    "test": "node --test --experimental-test-isolation=none 'packages/*/test/*.test.ts' 'packages/*/test/*.test.mjs' 'apps/desktop/src/**/*.test.ts' 'integrations/*/test/*.test.mjs'",
+    "test": "node --test --experimental-test-isolation=none 'packages/*/test/*.test.ts' 'packages/*/test/*.test.mjs' 'apps/desktop/src/**/*.test.ts' 'integrations/*/test/*.test.mjs' 'fixtures/*/test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit && pnpm --filter @shrike/desktop typecheck",
     "e2e": "pnpm build && pnpm --filter @shrike/desktop e2e"
   },

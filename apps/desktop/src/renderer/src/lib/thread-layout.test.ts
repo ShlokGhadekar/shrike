@@ -462,6 +462,7 @@ test("live: a same-origin request with nothing recorded inside lands on a grey S
   assert.ok(!buildTrip(view(click, [node(served, [node(ev({ startMs: 11, kind: "http_request", parentId: served.id, name: "POST /api/save", http: { method: "POST", url: "/api/save", status: 200 } }))])], "ok"), new Set(), known).stations.some((s) => s.live), "a recorder answered: no grey station");
   assert.ok(!buildTrip(view(click, [node(call("/api/save"))], "ok"), new Set(), knownPlaces([page])).stations.some((s) => s.live), "a local project never shows it");
   assert.equal(buildTrip(view(click, [node(call("/api/save", { http: { method: "GET", url: "/api/save", status: 200, resHeaders: { "x-vercel-cache": "HIT" } } }))], "ok"), new Set(), known).stations.find((s) => s.live)!.label, "From cache");
+  assert.equal(buildTrip(view(click, [node(call("/api/save", { http: { method: "GET", url: "/api/save", status: 200, fromCache: true } }))], "ok"), new Set(), known).stations.find((s) => s.live)!.label, "From cache", "#55 a service worker's cache");
 });
 
 test("live: Server-Timing entries with a duration become the grey station's chip (#59)", () => {

@@ -18,7 +18,7 @@ Shrike sees request bodies, cookies, database queries and source code. People wi
 | Agent CLI uses its own edit/shell tools to bypass the diff | Those tools disabled per brain (see [05-agent.md](05-agent.md#agent-brains)); fallback is read-only sandbox or throwaway worktree. A Claude Code the user starts in their own terminal (MCP9) isn't Shrike's to configure: Shrike offers a settings snippet to copy that denies `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and `Bash`, and its own tools still change code only through `propose_patch` and the user's click, on a card that names the client |
 | Another local process sends fake events or reads the ingest | Ingest binds `127.0.0.1` on a random port; per-session random token required; tokens rotate per run |
 | Another local process uses Shrike's MCP server | The server binds `127.0.0.1` only and needs a 32-byte bearer token (constant-time check). The main server's port and token persist in userData `mcp.json` (0600, rewritten through a temp file and rename) so an outside Claude Code keeps working after a restart; worktree and start servers stay random per launch. **New token** in Tools rotates it and closes every session an outside client opened; Shrike's own runs use a second token that never leaves the app session, so a reset doesn't break a run in flight. If the saved port is taken the server takes a random one and Tools says so Shrike never writes the token into Claude Code's files; the user pastes the `claude mcp add` line themselves |
-| Malicious page in the app pane escapes into Shrike | App pane is a separate `WebContentsView` with its own session partition, `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`; no preload exposes Shrike APIs to it |
+| Malicious page in the app pane escapes into Shrike | App pane is a `<webview>` in its own session partition, never Shrike's: `persist:shrike-app` for local apps and `persist:live-<hash of host>` for each live site (#55), so a live login never mixes with local cookies. Main names the partition (`ProjectInfo.livePartition`); the dock and the app window use the same one. `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`; no preload exposes Shrike APIs to it, and sign-in popups get the same settings |
 | Renderer compromise reaches Node | Renderer sandboxed; preload exposes only typed IPC; main validates every message with zod |
 | Instrumentation runs in production by accident | node-agent refuses to start when `NODE_ENV=production`; it's only ever injected by Shrike's launcher. python-agent does nothing without the `SHRIKE_*` variables only Shrike's runner sets |
 | Agent makes destructive API calls against a real database | Data-changing requests outside a recorded scenario need approval; warn when `DATABASE_URL` points at a non-local host |
@@ -30,21 +30,33 @@ Shrike sees request bodies, cookies, database queries and source code. People wi
 | The API client reaches hosts outside the app, or the agent does | Your own sends from the API client (AP) go to any http(s) host you type, like Bruno or Postman; only the app's own addresses get Shrike's `traceparent`. An agent's `send_request` or `save_request` to anything other than the app's local address shows an approval card first (GET included), and data-changing requests to the app still ask too. An agent's send never follows a redirect to another origin and never sees `{{vars}}` set by your own sends. On a live project's origins an agent may only send GET and HEAD, each path asks once, and live sends get no `traceparent` (#53). Assertions run as pure checks, never code |
 | A collection's scripts or files hurt your machine | Collection scripts (Bruno `script:*` and `tests`) run only on your own sends, never the agent's, in a `node:vm` context inside a worker thread: no `require`, `process`, timers or network, string code generation off, only JSON crosses in and out, 64MB heap, and the worker is killed after 2s. Linked Bruno folders are written only when you press Save, atomically (temp file, then rename); links, `..`, `.claude`, `.git` and `node_modules` paths are refused. Secret environment values go to userData `api-secrets.json`, encrypted with Electron `safeStorage`; files get `vars:secret` names only. History (last 200 sends per project, userData) is redacted before it's written |
 | Live page scripts forge recorder events (live projects) | The browser recorder keeps its binding in a closure and deletes `window.__shrikeEmit` before page scripts run; flow and point messages are ignored outside their modes (#54) |
-| Live agent tool output carries end-user data (page text, names, emails) | In a live project every tool's output masks emails as `[email#n]` after redaction, before it reaches the model (#53). Phone numbers and the Vercel bypass token (#51) and value masking (#52) are planned at the same place |
+| A sign-in on a live site leaks or weakens trust (live projects) | Sign-in popups get the pane's recorder through the same closure binding, and can't answer point mode (#55). The user agent is plain Chrome everywhere, with Electron's and Shrike's tokens removed, so it names nothing about Shrike. A bad certificate (self-signed, expired, wrong host) is refused with a plain message and never trusted. A basic-auth username and password go from a Shrike dialog straight to Chromium, which keeps them in memory for that session; Shrike never stores or logs them. **Sign out of your live site** clears the partition's cookies, storage, cache and basic-auth |
+| Live agent tool output carries end-user data (page text, names, emails) | In a live project every tool's output masks emails as `[email#n]` after redaction, before it reaches the model (#53). Live trips and events (marked `live`, including the agent's own sends to the live site) and live `send_request` bodies reach the agent with values masked (#52); local trips in the same project keep theirs. Page text from `app_snapshot` gets the email mask only. Phone numbers and the Vercel bypass token (#51) are planned at the same place |
 | Supply-chain compromise of Shrike itself | Signed and notarised builds, lockfile pinning, dependency review in CI, minimal deps in node-agent and browser-agent, none beyond the standard library in python-agent (they run inside user apps) |
 
 ## Redaction rules (`@shrike/redact`)
 
 Applied in this order, on every event at ingest and again on every tool output and export.
 
-1. **Headers:** `authorization`, `cookie`, `set-cookie`, `proxy-authorization`, `x-api-key` (user-configured names are planned).
+1. **Headers:** `authorization`, `cookie`, `set-cookie`, `proxy-authorization`, `x-api-key`, plus the user's `redact.headers` (rule 6).
 2. **Keys in JSON bodies, query strings, form data, args and return values:** any key matching `/pass(word)?|passwd|secret|token|api[-_]?key|auth|session|credential|private[-_]?key|card|cvv|ssn/i`.
 3. **Env values (planned):** read `.env*` files at session start; any string equal to one of those values (≥ 6 chars) is replaced wherever it appears.
 4. **Known secret shapes:** AWS access keys, Stripe keys, OpenAI/Anthropic keys, GitHub tokens, Slack tokens, JWTs, PEM blocks, connection strings with passwords.
 5. **High-entropy strings:** ≥ 24 chars with Shannon entropy above a threshold in a value position, flagged and masked.
-6. **User rules** from `.shrike/config.json` (planned).
+6. **User rules** from `.shrike/config.json` (built, #52): `"redact": { "keys": ["address"], "headers": ["x-tenant"], "keep": ["status", "plan"] }`. `keys` and `headers` are redacted at the store in every mode, like the built-in names (`keys` matches inside a name, as rule 2 does). `keep` only spares values from masking (below). The scanner checks the block; a broken one is ignored whole, with a warning in the log and a note in Setup.
 
 Replacement format: `"[redacted:password]"`, keeping the key so the structure stays debuggable. Redaction is logged as a count per event (never the value).
+
+### Value masking (`maskValues`, #52)
+
+Never at the store: on your screen a live trip shows its real values and value chips. Where a live trip leaves your screen, `maskValues` / `maskAction` / `maskText` in `@shrike/redact` replace string values with `[text#n]`, numbered so the same value reads the same everywhere in a trip. It covers JSON and form bodies, query values, SQL statements and params, args, return values, log values in quotes, curl commands and row cells. Kept: keys, numbers, booleans, nulls, empty strings, UUIDs and integer ids, short enum-like words (no spaces, 24 characters or fewer, no email or phone shape, so `"pending"` vs `"Pending"` stays visible), and anything named in `redact.keep`. A 25-character code is masked; add its key to `keep`.
+
+Boundaries today:
+- **REC clips** of a live trip (`capture/recorder.ts` through `forShare` in `capture/paint.ts`), including the live pane of the local vs live split. The page screenshot is left out (absent, not blurred) unless you tick **Show the page** in the REC menu, which shows a preview of the exact frame first.
+- **Live agent tool output** (`packages/mcp-server/src/tools.ts`).
+- Cards (#64), links (#68) and `.shriketrace` files (#67) call the same functions when they're built.
+
+Not masked: the clicked element's own words in a trip's title (`Clicked "…"`), error messages, free text outside quotes in log lines, and header values outside rule 1 and rule 6.
 
 rrweb (planned, with DOM replay): `maskAllInputs: true` by default; `password` inputs are always masked; users can unmask non-sensitive inputs per selector.
 
@@ -53,8 +65,9 @@ rrweb (planned, with DOM replay): `maskAllInputs: true` by default; `password` i
 Decided 2026-10-14 (#50); see [02-architecture.md](02-architecture.md#live-apps-decided-2026-10-14-50). Recording your production app means recording real customers' data, which makes you its data controller:
 
 - Secrets and personal data (emails, phone numbers, the Vercel protection bypass token) are redacted at the store for live projects (#51).
-- Shared cards, clips, links, `.shriketrace` files and live agent tool output mask values, and leave page screenshots out by default (#52).
+- Shared cards, clips, links, `.shriketrace` files and live agent tool output mask values, and leave page screenshots out by default (#52; built for clips and agent output, see [Value masking](#value-masking-maskvalues-52)).
 - Live agent tool output can contain end-user data; sending it to your agent provider is your call, and Shrike masks what it can first.
+- A live site signs in inside its own session (`persist:live-<hash of host>`), which survives restarts until you choose **Sign out of your live site** in More (#55).
 
 ## Data sent off the machine
 

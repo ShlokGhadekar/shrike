@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { IngestMessage } from "@shrike/schema";
-import { AppView, placeAppWindow, popupPolicy, withConfig } from "./app-view.ts";
+import { AppView, livePartition, placeAppWindow, plainUserAgent, popupPolicy, withConfig } from "./app-view.ts";
 
 test("sign-in popups open as sandboxed child windows; other schemes are refused", () => {
   const p = popupPolicy("https://accounts.google.com/o/oauth2/auth?x=1");
@@ -9,6 +9,29 @@ test("sign-in popups open as sandboxed child windows; other schemes are refused"
   assert.equal(p.action === "allow" && p.overrideBrowserWindowOptions.webPreferences?.nodeIntegration, false);
   assert.equal(popupPolicy("http://127.0.0.1:19099/emulator/auth/handler").action, "allow");
   for (const u of ["file:///etc/passwd", "javascript:alert(1)", "shrike://x"]) assert.equal(popupPolicy(u).action, "deny", u);
+});
+
+test("#55 a live site gets its own session per host and a plain Chrome user agent", () => {
+  const p = livePartition("https://Shop.example.com/app?x=1");
+  assert.match(p, /^persist:live-[0-9a-f]{16}$/);
+  assert.equal(livePartition("https://shop.example.com/other"), p, "same host, same session");
+  assert.notEqual(livePartition("https://staging.example.com/"), p);
+  assert.notEqual(livePartition("https://shop.example.com:8443/"), p, "a port is another host");
+  assert.ok(!p.includes("shop"), "the host isn't spelled out in the partition name");
+  const electron = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) shrike-desktop/0.2.0 Chrome/140.0.7339.249 Electron/38.8.6 Safari/537.36";
+  assert.equal(plainUserAgent(electron), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7339.249 Safari/537.36");
+  assert.equal(plainUserAgent(plainUserAgent(electron)), plainUserAgent(electron));
+});
+
+test("#55 a popup's page can't answer point mode", () => {
+  const picks: unknown[] = [];
+  const v = new AppView({ bundlePath: "/none", appUrl: () => undefined, onMessage: () => {}, onWarning: () => {} });
+  v.onPoint = (p) => void picks.push(p);
+  v["pointing"] = true;
+  v["onBinding"](JSON.stringify({ type: "point", cancelled: true }), true);
+  assert.deepEqual(picks, []);
+  v["onBinding"](JSON.stringify({ type: "point", cancelled: true }));
+  assert.deepEqual(picks, [null]);
 });
 
 test("the app window reopens where it was, or centred on the primary display when that display is gone", () => {

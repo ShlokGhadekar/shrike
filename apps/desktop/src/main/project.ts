@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { ProcessSpec, ProjectInfo } from "@shrike/schema";
 import { detectProject, plannedPlaces } from "@shrike/scanner";
+import { livePartition } from "./app-view.ts";
 import { runSkillId, runSkillPath } from "./start/runskill.ts";
 import { writeAtomicSync } from "./state-file.ts";
 
@@ -34,6 +35,7 @@ export async function loadProject(root: string): Promise<{ info: ProjectInfo; se
   const live = liveZ.parse(config); // authoritative over the scanner's lenient read
   info.liveUrl = live.liveUrl;
   info.origins = live.origins?.length ? live.origins : undefined;
+  info.livePartition = live.liveUrl ? livePartition(live.liveUrl) : undefined;
   return { info, serverUrl: typeof serverUrl === "string" ? serverUrl : info.appUrl ? undefined : info.processes.find((p) => p.url)?.url };
 }
 

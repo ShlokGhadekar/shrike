@@ -53,6 +53,18 @@ function target(raw: string, method: string): Target {
   };
 }
 
+const now = performance.now.bind(performance);
+const entriesByName = performance.getEntriesByName.bind(performance);
+/** #55: the browser's HTTP cache or a service worker's Cache Storage answered (Resource Timing `deliveryType`, Chromium). */
+function fromCache(url: string, since: number): boolean {
+  try {
+    const e = entriesByName(url, "resource").filter((x) => x.startTime >= since - 1).at(-1) as { deliveryType?: string } | undefined;
+    return e?.deliveryType === "cache" || e?.deliveryType === "cache-storage";
+  } catch {
+    return false;
+  }
+}
+
 function startEvent(t: Target, method: string, data?: DataKind): { ev: DebugEvent; settle(failed: boolean): void } {
   const { action, settle: release } = beginWork("Background request");
   const ev: DebugEvent = {
@@ -74,6 +86,7 @@ function startEvent(t: Target, method: string, data?: DataKind): { ev: DebugEven
     const lines = stack.split("\n");
     ev.stack = [lines[0], ...lines.slice(3)].join("\n");
   }
+  const t0 = now();
   let finished = false;
   return {
     ev,
@@ -82,6 +95,7 @@ function startEvent(t: Target, method: string, data?: DataKind): { ev: DebugEven
       finished = true;
       ev.durationMs = Date.now() - ev.startMs;
       if (failed) ev.status = "error";
+      if (fromCache(t.url.href, t0)) ev.http!.fromCache = true;
       for (const e of data ? toData(ev, t.url, data, newEventId) : [ev]) emitEvent(e);
       release(failed);
     },

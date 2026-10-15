@@ -4,6 +4,7 @@ import { useProject } from "./stores/project.ts";
 import { Welcome } from "./hud/Welcome.tsx";
 import { Frame, Shell } from "./hud/Shell.tsx";
 import { Toasts } from "./components/Toasts.tsx";
+import { LiveSignIn } from "./hud/LiveSignIn.tsx";
 import { Spinner } from "./components/ui.tsx";
 
 export function App() {
@@ -30,6 +31,7 @@ export function App() {
         <Welcome />
       )}
       <Toasts />
+      <LiveSignIn />
     </>
   );
 }

@@ -679,6 +679,7 @@ function unseen(e: DebugEvent, rendered: boolean): Pick<Station, "label" | "wher
   const where = h?.status ? statusWords(h.status) : rendered && !h ? "page load" : undefined;
   const what = h ? `${h.method} ${pathOf(h.url)}` : "your page";
   const chip = serverTiming(e);
+  if (h?.fromCache) return { label: "From cache", where, chip, caption: `Your browser answered ${what} from its cache or the site's service worker. It never reached your server.` }; // #55
   if (CDN_HIT.some((k) => /^hit\b/i.test(h?.resHeaders?.[k] ?? ""))) return { label: "From cache", where, chip, caption: `A cache answered ${what}, not your server.` };
   // ponytail: every live page load reads as rendered on the server; telling a static page apart needs the document's response headers
   if (rendered) return { label: "Rendered on the server", where, chip, caption: `The server rendered ${what}. Your browser only sees the finished result.` };

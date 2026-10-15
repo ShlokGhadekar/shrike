@@ -1,0 +1,5 @@
+body { margin: 0; font-family: system-ui, sans-serif; background: #f6f7f9; color: #1c2024; }
+.app { max-width: 480px; margin: 48px auto; padding: 24px; background: #fff; border: 1px solid #e0e1e6; border-radius: 12px; }
+form { display: flex; gap: 8px; align-items: center; }
+input { flex: 1; padding: 8px 12px; font: inherit; border: 1px solid #e0e1e6; border-radius: 8px; }
+button { padding: 8px 14px; font: inherit; color: #fff; background: #3e63dd; border: 0; border-radius: 8px; cursor: pointer; }

@@ -107,6 +107,16 @@ test("config overrides, lockfiles, missing or broken files", async () => {
   await assert.doesNotReject(scanRoutes(join(a, "does-not-exist")));
 });
 
+test("#52: redact rules from .shrike/config.json, and a broken block is ignored with a note", async () => {
+  const redact = { keys: ["address"], headers: ["x-tenant"], keep: ["status", "plan"] };
+  assert.deepEqual((await detectProject(project({ ".shrike/config.json": JSON.stringify({ liveUrl: "https://your-app.com", redact }) }))).redact, redact);
+  for (const bad of [["address"], { keys: "address" }, { keys: [3] }, { keep: ["status"], hide: ["x"] }]) {
+    const p = await detectProject(project({ ".shrike/config.json": JSON.stringify({ liveUrl: "https://your-app.com", redact: bad }) }));
+    assert.equal(p.redact, undefined, JSON.stringify(bad));
+    assert.match(p.notes?.join(" ") ?? "", /Shrike ignored "redact"/);
+  }
+});
+
 test("next app router and pages/api", async () => {
   const root = project({
     "package.json": JSON.stringify({ name: "nx", dependencies: { next: "15", react: "19" } }),

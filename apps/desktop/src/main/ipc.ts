@@ -141,7 +141,7 @@ export interface AppWindowCtl {
   open(): void;
   close(): void;
 }
-const APP_WINDOW_CALLS = new Set<string>(["reloadApp", "startPointMode", "cancelPointMode", "dockApp", "getRunStatus"]);
+const APP_WINDOW_CALLS = new Set<string>(["reloadApp", "startPointMode", "cancelPointMode", "dockApp", "getRunStatus", "appPartition"]);
 const APP_WINDOW_EVENTS = new Set<string>(["run:status", "point:picked", "point:cancelled"]);
 
 export function registerIpc(win: () => BrowserWindow | undefined, appWin: AppWindowCtl = { get: () => undefined, open() {}, close() {} }): void {
@@ -276,6 +276,9 @@ export function registerIpc(win: () => BrowserWindow | undefined, appWin: AppWin
     return openProject(root);
   });
   handle("setAppSide", z.tuple([z.enum(["local", "live"])]), (side) => hostExtras.setAppSide(side));
+  handle("signOutLive", none, () => hostExtras.signOutLive());
+  handle("appPartition", none, async () => hostExtras.appPartition());
+  handle("answerLiveLogin", z.tuple([str, z.object({ username: z.string().max(1024), password: z.string().max(1024) }).strict().nullable()]), async (id, login) => hostExtras.answerLiveLogin(id, login));
   // ---- end setup ----
 
   // ---- flows: B1 record, B2 replay, B3 keep watching, B4 my MCP servers, B5 Shrike drivable, sessions ----

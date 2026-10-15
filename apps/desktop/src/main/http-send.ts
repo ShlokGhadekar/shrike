@@ -49,6 +49,7 @@ export async function sendRequest(
     trigger,
     ...(spec.name ? { caller: { kind: trigger, label: spec.name.slice(0, 120) } } : {}), // AP: the request's name on the caller card
     ...(spec.resendOf ? { resendOf: spec.resendOf } : {}),
+    ...(onLive ? { live: true as const } : {}), // #52: a send to the live site is live data, masked when it leaves the screen
   };
   store.handle({ type: "events", events: [root] });
 
@@ -65,6 +66,7 @@ export async function sendRequest(
     startMs: start,
     status: "ok",
     http: { method, url: path, reqHeaders, reqBody: hasBody ? cut(spec.body!, MAX_EVENT_BODY) : undefined },
+    ...(onLive ? { live: true as const } : {}),
   };
 
   let cur = url;

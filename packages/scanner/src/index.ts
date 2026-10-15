@@ -3,7 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { Place, PlaceKind, ProcessSpec, ProjectInfo, Route } from "@shrike/schema";
+import type { Place, PlaceKind, ProcessSpec, ProjectInfo, RedactRules, Route } from "@shrike/schema";
 
 const SKIP_DIRS = new Set(["node_modules", "dist", ".git", "build", ".next", ".turbo", ".vercel", "coverage", "out", "venv", "__pycache__", "site-packages"]);
 const CODE_EXT = /\.(ts|tsx|js|mjs|py)$/;
@@ -113,6 +113,8 @@ export async function detectProject(root: string, opts: { java?: () => Promise<J
     (frontend ? processes.find((p) => p.url && (ctx.web.has(p.name) || /^(web|app|client|frontend|site|ui)$/.test(p.name) || /\b(vite|next)\b/.test(`${p.command} ${scripts[`dev:${p.name}`] ?? ""}`)))?.url : undefined) ??
     (frontend === "vite-react" || frontend === "vite" ? "http://localhost:5173" : frontend === "next" || frontend === "remix" ? "http://localhost:3000" : undefined);
   const declaredPlaces = configPlaces(config.places);
+  const redact = configRedact(config.redact);
+  if (redact.warning) console.warn(redact.warning), ctx.notes.push(redact.warning);
   if (appUrl && ctx.spa.size === 1) processes = processes.map((p) => (!p.url && ctx.spa.has(p.name) ? { ...p, url: appUrl } : p));
 
   return {
@@ -129,6 +131,7 @@ export async function detectProject(root: string, opts: { java?: () => Promise<J
     ...(ctx.notes.length ? { notes: ctx.notes } : {}),
     ...(liveUrl ? { liveUrl } : {}),
     ...(origins.length ? { origins } : {}),
+    ...(redact.rules ? { redact: redact.rules } : {}),
   };
 }
 
@@ -440,6 +443,21 @@ export function configPlaces(v: unknown): ProjectInfo["declaredPlaces"] {
     if (name && PLACE_KINDS.includes(o.kind as PlaceKind)) out[key] = { kind: o.kind as PlaceKind, name };
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+/** #52: `redact` from .shrike/config.json. All or nothing: a broken block is ignored with a warning, never half applied. */
+export function configRedact(v: unknown): { rules?: RedactRules; warning?: string } {
+  if (v === undefined) return {};
+  const warning = 'Shrike ignored "redact" in .shrike/config.json. It should look like { "keys": ["address"], "headers": ["x-tenant"], "keep": ["status"] }.';
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { warning };
+  const o = v as Record<string, unknown>;
+  const rules: RedactRules = {};
+  for (const k of Object.keys(o)) {
+    const list = o[k];
+    if ((k !== "keys" && k !== "headers" && k !== "keep") || !Array.isArray(list) || list.length > 200 || !list.every((x) => typeof x === "string" && x.trim() && x.length <= 100)) return { warning };
+    rules[k] = list.map((x: string) => x.trim());
+  }
+  return { rules };
 }
 
 // ponytail: a port flag or PORT= in the script text; anything else is learnt from the output at run time.

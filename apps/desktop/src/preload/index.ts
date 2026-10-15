@@ -27,7 +27,7 @@ const agentMethods = ["listSkills", "getMemory", "removeMemory", "getCheckpoints
 for (const m of agentMethods) api[m] = (...args: unknown[]) => ipcRenderer.invoke(`shrike:${m}`, ...args);
 
 // setup: D12 processes
-const setupMethods = ["setProcesses", "setLiveUrl", "setAppSide"] as const satisfies readonly Exclude<keyof ShrikeApi, "on">[];
+const setupMethods = ["setProcesses", "setLiveUrl", "setAppSide", "signOutLive", "answerLiveLogin", "appPartition"] as const satisfies readonly Exclude<keyof ShrikeApi, "on">[];
 for (const m of setupMethods) api[m] = (...args: unknown[]) => ipcRenderer.invoke(`shrike:${m}`, ...args);
 
 // sdlc: L1–L7 rail, hidden moves, tests, saved commands

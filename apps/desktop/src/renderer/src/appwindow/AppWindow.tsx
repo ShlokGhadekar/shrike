@@ -15,14 +15,17 @@ export function AppWindow() {
   const ref = useRef<HTMLWebViewElement>(null);
   const [status, setStatus] = useState<RunStatus | null>(null);
   const [url, setUrl] = useState("");
+  const [partition, setPartition] = useState<string | null>(null);
   const pointing = useUi((s) => s.pointing);
 
   useEffect(() => {
     document.title = "Your app";
     const a = api();
+    const sync = () => void a.appPartition().then(setPartition, () => {}); // #55: the same session as the dock, following the side
     void a.getRunStatus().then(setStatus).catch(() => {});
+    sync();
     const offs = [
-      a.on("run:status", setStatus),
+      a.on("run:status", (s) => (setStatus(s), sync())),
       a.on("point:picked", (pick) => useUi.setState({ pointing: false, pick: { ...pick, at: Date.now() } })),
       a.on("point:cancelled", () => useUi.setState({ pointing: false })),
     ];
@@ -38,7 +41,7 @@ export function AppWindow() {
       el?.removeEventListener("did-navigate", onNav);
       el?.removeEventListener("did-navigate-in-page", onNav);
     };
-  }, []);
+  }, [partition]);
 
   const running = status?.state === "running";
   const point = async () => {
@@ -75,7 +78,7 @@ export function AppWindow() {
         </button>
       </header>
       <div className="relative min-h-0 flex-1 overflow-hidden bg-void">
-        <webview ref={ref} partition="persist:shrike-app" allowpopups={"true" as unknown as boolean} src="about:blank" className="absolute inset-0 h-full w-full" style={running ? PAGE_CANVAS : undefined} />
+        {partition && <webview key={partition} ref={ref} partition={partition} allowpopups={"true" as unknown as boolean} src="about:blank" className="absolute inset-0 h-full w-full" style={running ? PAGE_CANVAS : undefined} />}
         {running && <PointLayer />}
         {status && !running && (
           <div className="absolute inset-0 grid place-items-center bg-void p-6 text-center">

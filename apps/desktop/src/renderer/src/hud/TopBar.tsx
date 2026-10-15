@@ -1,10 +1,11 @@
 import { useState, type CSSProperties } from "react";
-import { BookOpen, Ellipsis, GitPullRequest, Palette, Play, Route, Settings, Share2, Square } from "lucide-react";
+import { BookOpen, Ellipsis, GitPullRequest, LogOut, Palette, Play, Route, Settings, Share2, Square } from "lucide-react";
 import { isLiveSite, useProject } from "../stores/project.ts";
 import { useRun } from "../stores/run.ts";
 import { useAgent } from "../stores/agent.ts";
 import { useThread } from "../stores/thread.ts";
-import { useUi } from "../stores/ui.ts";
+import { toast, useUi } from "../stores/ui.ts";
+import { call } from "../lib/api.ts";
 import { cx, IconButton } from "../components/ui.tsx";
 import { Dot, Elapsed } from "../components/Activity.tsx";
 import { openIssue, run, tidyUp } from "./commands.ts";
@@ -134,6 +135,7 @@ function More() {
     { label: "Quests", key: "Q", icon: <Flag size={13} />, go: () => useQuests.getState().setOpen(!useQuests.getState().open) },
     { label: "Ship", key: "S", icon: <GitPullRequest size={13} />, go: () => run("ship") },
   ];
+  const live = useProject((s) => isLiveSite(s.project)); // LV2 (#55)
   return (
     <>
       <IconButton label="More" popoverTarget="topbar-more" style={{ anchorName: "--topbar-more" } as CSSProperties}>
@@ -153,6 +155,16 @@ function More() {
             <kbd className="ml-auto pl-4 font-mono text-[11px] text-faint">{it.key}</kbd>
           </button>
         ))}
+        {live && (
+          <button
+            type="button"
+            className="hud-btn w-full"
+            onClick={(e) => (e.currentTarget.parentElement?.hidePopover(), void call((a) => a.signOutLive().then(() => true), "Couldn't sign out").then((ok) => ok && toast("Signed out of your live site.", "ok")))}
+          >
+            <LogOut size={13} />
+            Sign out of your live site
+          </button>
+        )}
       </div>
     </>
   );

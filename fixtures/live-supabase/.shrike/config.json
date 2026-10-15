@@ -1,0 +1,4 @@
+{
+  "devCommand": "npm run dev:stub",
+  "appUrl": "http://localhost:5173"
+}
