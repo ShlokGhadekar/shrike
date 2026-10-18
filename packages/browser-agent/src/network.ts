@@ -319,11 +319,48 @@ function parseHeaders(raw: string): Record<string, string> {
   return out;
 }
 
+// #85: beacons (analytics, save on leave) have no response, so the event settles at once; false means the browser refused to queue it.
+function patchBeacon(): void {
+  if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return;
+  const send = navigator.sendBeacon.bind(navigator);
+  navigator.sendBeacon = function sendBeacon(url: string | URL, data?: BodyInit | null): boolean {
+    let ev: DebugEvent | undefined;
+    let settle: ((failed: boolean) => void) | undefined;
+    try {
+      const t = target(String(url), "POST");
+      const kind = dataKind(t.url, "POST", {});
+      if (kind !== "skip") {
+        ({ ev, settle } = startEvent(t, "POST", kind));
+        const body = describeBody(data);
+        if (body !== undefined) ev.http!.reqBody = body;
+      }
+    } catch {}
+    let queued: boolean;
+    try {
+      queued = send.apply(undefined, arguments as unknown as Parameters<typeof send>);
+    } catch (err) {
+      // an invalid URL throws before anything is sent
+      try {
+        settle?.(true);
+      } catch {}
+      throw err;
+    }
+    try {
+      if (ev && !queued) ev.error = { message: "The browser didn't queue this beacon, so it was never sent", type: "BeaconRefused" };
+      settle?.(!queued);
+    } catch {}
+    return queued;
+  };
+}
+
 export function installNetwork(): void {
   try {
     patchFetch();
   } catch {}
   try {
     patchXhr();
+  } catch {}
+  try {
+    patchBeacon();
   } catch {}
 }

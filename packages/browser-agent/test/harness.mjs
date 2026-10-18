@@ -145,12 +145,16 @@ try {
   out.steps.typeResult = await evaluate(`window.__shrike.type(${JSON.stringify(ref("New todo"))}, "buy milk")`);
   out.echo = await evaluate(`document.getElementById("echo").textContent`);
 
-  for (const name of ["Add Todo", "Fail", "Network fail", "Cross", "Stream", "Abort", "Xhr", "Req", "Buy milk"]) {
+  for (const name of ["Add Todo", "Fail", "Network fail", "Cross", "Stream", "Abort", "Xhr", "Req", "Beacon", "Big beacon", "Buy milk"]) {
     const id = await evaluate(`window.__shrike.click(${JSON.stringify(ref(name))})`);
     out.steps[name] = id;
     phase(`clicked ${name} -> ${id}`);
     if (id) await waitFor(() => ended(id), 8000, `end of ${name}`);
   }
+  // #85: a beacon outside any click lands in a background trip, like a background fetch.
+  out.bgBeacon = await evaluate(`navigator.sendBeacon("/api/echo", "background")`);
+  await waitFor(() => out.msgs.some((m) => m.type === "events" && m.events.some((e) => e.http?.reqBody === "background")), 5000, "background beacon");
+  await sleep(600);
   out.steps.submit = await evaluate(`window.__shrike.type(${JSON.stringify(ref("Search"))}, "q", true)`);
   if (out.steps.submit) await waitFor(() => ended(out.steps.submit), 5000, "submit end");
   // Enter in the field: the browser clicks the form's Go button for it; that's still the form's submit.

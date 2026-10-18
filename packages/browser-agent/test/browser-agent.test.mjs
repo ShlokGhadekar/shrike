@@ -66,7 +66,7 @@ test("browser-agent end to end in Electron", { timeout: 90_000 }, async () => {
 
   // Idempotent: one user_action per click despite the second injection.
   const roots = events.filter((e) => e.kind === "user_action");
-  assert.equal(new Set(roots.map((e) => e.id)).size, 16, roots.map((e) => e.name).join(", ")); // 11 + Enter in Search + 4 from the B1 recording
+  assert.equal(new Set(roots.map((e) => e.id)).size, 19, roots.map((e) => e.name).join(", ")); // 13 + the background beacon + Enter in Search + 4 from the B1 recording
 
   // type() drives a React controlled input.
   assert.equal(out.echo, "buy milk");
@@ -163,6 +163,31 @@ test("browser-agent end to end in Electron", { timeout: 90_000 }, async () => {
   assert.equal(out.results.req.headers["x-test"], "1");
   const r = http(out.steps.Req)[0];
   assert.equal(out.results.req.headers.traceparent, `00-${r.traceId}-${r.id}-01`);
+
+  // #85: a beacon shows on its click's trip as POST with its body, and settles at once (it has no response).
+  const [b] = http(out.steps.Beacon);
+  assert.equal(b.name, "POST /api/echo");
+  assert.equal(b.http.method, "POST");
+  assert.equal(b.http.reqBody, "x");
+  assert.equal(b.status, "ok");
+  assert.equal(b.http.status, undefined, "no response to show");
+  assert.ok(b.durationMs >= 0);
+  assert.match(b.stack.split("\n")[1], /page\.js/, "first frame is the page's own call");
+  assert.equal(out.results.beacon, true, "the page gets the browser's answer");
+  assert.equal(finalRoot(out.steps.Beacon).status, "ok");
+  assert.ok(out.received.some((r) => r.path === "/api/echo" && r.method === "POST" && r.traceparent === null), "the beacon reached the server, without traceparent");
+  // Refused (over the browser's 64 KB queue limit): marked failed, the page still gets false.
+  const [big] = http(out.steps["Big beacon"]);
+  assert.equal(big.status, "error");
+  assert.equal(big.error.type, "BeaconRefused");
+  assert.match(big.http.reqBody, /…\[truncated\]$/);
+  assert.equal(out.results.bigBeacon, false);
+  assert.equal(finalRoot(out.steps["Big beacon"]).status, "error");
+  // Outside any click: its own background trip.
+  assert.equal(out.bgBeacon, true);
+  const bg = events.find((e) => e.http?.reqBody === "background");
+  assert.equal(bg.name, "POST /api/echo");
+  assert.equal(finalRoot(bg.parentId).name, "Background request");
 
   // Checkbox through its label text.
   assert.equal(finalRoot(out.steps["Buy milk"]).name, 'Ticked "Buy milk"');

@@ -68,6 +68,12 @@ function App() {
     const r = await fetch(new Request("/api/echo", { method: "POST", headers: { "x-test": "1" }, body: "from request" }));
     results.req = await r.json();
   }
+  function beacon() {
+    results.beacon = navigator.sendBeacon("/api/echo", "x");
+  }
+  function bigBeacon() {
+    results.bigBeacon = navigator.sendBeacon("/api/echo", "x".repeat(70_000)); // over the 64 KB queue limit: the browser refuses it
+  }
   function onSubmit(ev) {
     ev.preventDefault();
     fetch("/api/echo", { method: "POST", body: "form" })
@@ -88,6 +94,8 @@ function App() {
     e("button", { onClick: abort }, "Abort"),
     e("button", { onClick: xhr }, "Xhr"),
     e("button", { onClick: req }, "Req"),
+    e("button", { onClick: beacon }, "Beacon"),
+    e("button", { onClick: bigBeacon }, "Big beacon"),
     e("label", null, e("input", { type: "checkbox" }), " Buy milk"),
     e("form", { onSubmit }, e("input", { "aria-label": "Search", defaultValue: "" }), e("button", { type: "submit" }, "Go")),
     e("p", { id: "echo" }, text),

@@ -8,7 +8,7 @@ src/
 ├── emit.ts       # binding calls, buffered (500) and retried every 200ms when missing
 ├── ids.ts        # trace and event ids
 ├── actions.ts    # action windows: close 400ms after the last request settles
-├── network.ts    # fetch + XHR patch, traceparent for same-origin only; cross-origin calls are also sent at start so main can join their server side
+├── network.ts    # fetch + XHR + sendBeacon patch, traceparent for same-origin only; cross-origin calls are also sent at start so main can join their server side
 ├── data.ts       # the page's own database calls (Supabase PostgREST/auth, Firestore WebChannel/REST) as db_query on the database's lane
 ├── console.ts    # console, window errors, unhandled rejections
 ├── react.ts      # DOM element -> fiber -> _debugSource (React 18 dev), else _debugStack (React 19 dev, mapped by main)
